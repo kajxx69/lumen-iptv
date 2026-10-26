@@ -67,6 +67,13 @@ export const FakePortalConfigSchema = z.object({
   linkPrefixMode: z.enum(['mixed', 'none', 'ffmpeg', 'auto']).default('mixed'),
   /** Les vrais portails renvoient la plupart des nombres sous forme de chaînes. */
   stringNumbers: z.boolean().default(true),
+  /** Réponses sans enveloppe `{ js: … }`, variante de certains middlewares anciens. */
+  omitJsEnvelope: z.boolean().default(false),
+  /**
+   * Actions désactivées, sous la forme `type.action` (ex. `itv.get_all_channels`) : elles
+   * répondent une liste vide, comme les portails qui coupent les requêtes coûteuses.
+   */
+  disabledActions: z.array(z.string()).default([]),
 
   /**
    * Origine de l'horloge des flux. Placée dans le passé pour que les numéros de segment
@@ -169,6 +176,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): FakePortalConfig {
   const bools: [string, string][] = [
     ['requireDoAuth', 'REQUIRE_DO_AUTH'],
     ['stringNumbers', 'STRING_NUMBERS'],
+    ['omitJsEnvelope', 'OMIT_JS_ENVELOPE'],
     ['chaosEnabled', 'CHAOS_ENABLED'],
   ];
   for (const [field, key] of bools) {
@@ -178,6 +186,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): FakePortalConfig {
   const lists: [string, string][] = [
     ['entrypoints', 'ENTRYPOINTS'],
     ['allowedModels', 'ALLOWED_MODELS'],
+    ['disabledActions', 'DISABLED_ACTIONS'],
   ];
   for (const [field, key] of lists) {
     const v = read(key);

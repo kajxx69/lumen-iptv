@@ -1,9 +1,10 @@
 {
+  // Éditeur, ESLint et tests (qui tournent sous Node). La pureté du code de production
+  // est vérifiée à part par tsconfig.pure.json.
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    // Pas de types Node : le cœur doit compiler sans eux (règle d'or de PROJECT.md).
-    "types": [],
+    "types": ["node"],
     "noEmit": true
   },
-  "include": ["stalker", "sources", "catalog", "resilience"]
+  "include": ["stalker", "sources", "catalog", "resilience", "test", "vitest.config.ts"]
 }

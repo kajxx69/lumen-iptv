@@ -11,6 +11,12 @@
     "./resilience": "./resilience/index.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc -p tsconfig.pure.json && tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@lumen/fake-portal": "workspace:*"
   }
 }

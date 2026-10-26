@@ -492,12 +492,17 @@ export function registerStalkerApi(app: FastifyInstance, deps: ApiDeps): void {
     const requiresAuth = !(q['type'] === 'stb' && (action === 'get_profile' || action === 'do_auth'));
     if (requiresAuth && !check.session.authenticated) return fail(403, 'Authentication required.');
 
+    if (config.disabledActions.includes(`${q['type'] ?? ''}.${action}`)) return ok([]);
     const handler = handlers[q['type'] ?? '']?.[action];
     return handler === undefined ? fail(400, 'Unknown action.') : handler(ctx);
   }
 
   const route = async (req: FastifyRequest, reply: FastifyReply): Promise<FastifyReply> => {
-    const result = await handle(req);
+    const handled = await handle(req);
+    const result =
+      config.omitJsEnvelope && handled.status === 200
+        ? { ...handled, body: (handled.body as { js: unknown }).js }
+        : handled;
     return reply
       .code(result.status)
       .header('Content-Type', STALKER_CONTENT_TYPE)

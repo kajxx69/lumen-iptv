@@ -1,0 +1,9 @@
+{
+  // Règle d'or de PROJECT.md : le cœur compile sans aucun type Node ni DOM.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": [],
+    "noEmit": true
+  },
+  "include": ["stalker", "sources", "catalog", "resilience"]
+}

@@ -36,6 +36,7 @@ export default tseslint.config(
     // Règle d'or : le cœur métier doit tourner tel quel sur Android et desktop.
     // Toute I/O passe par des interfaces injectées.
     files: ['packages/core/**/*.ts'],
+    ignores: ['packages/core/test/**', 'packages/core/vitest.config.ts'],
     rules: {
       'no-restricted-imports': [
         'error',
@@ -56,6 +57,8 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-non-null-assertion': 'off',
       '@typescript-eslint/no-confusing-void-expression': 'off',
+      // Les matchers asymétriques de Vitest (`expect.any`) sont typés `any`.
+      '@typescript-eslint/no-unsafe-assignment': 'off',
     },
   },
   {
