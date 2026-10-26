@@ -1,0 +1,10 @@
+{
+  // Les tests e2e exécutent du code dans la page : types du navigateur nécessaires ici seulement.
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["**/*.ts"]
+}

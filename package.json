@@ -17,10 +17,13 @@
     "test:e2e": "playwright test",
     "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test",
     "fake-portal": "pnpm --filter @lumen/fake-portal start",
-    "fake-portal:dev": "pnpm --filter @lumen/fake-portal dev"
+    "fake-portal:dev": "pnpm --filter @lumen/fake-portal dev",
+    "server": "pnpm --filter @lumen/server start",
+    "server:dev": "pnpm --filter @lumen/server dev"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
+      "better-sqlite3",
       "esbuild"
     ]
   },

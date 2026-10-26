@@ -1,4 +1,22 @@
 services:
+  # Backend Lumen. Secrets dans un fichier .env à côté de ce fichier (jamais commité) :
+  #   LUMEN_MASTER_KEY=<openssl rand -base64 32>
+  #   LUMEN_ADMIN_PASSWORD=<au moins 10 caractères>
+  lumen:
+    build:
+      context: .
+      dockerfile: docker/server.Dockerfile
+    image: lumen/server:dev
+    ports:
+      - '8090:8090'
+    environment:
+      LUMEN_MASTER_KEY: ${LUMEN_MASTER_KEY:?définir LUMEN_MASTER_KEY dans .env}
+      LUMEN_ADMIN_PASSWORD: ${LUMEN_ADMIN_PASSWORD:-}
+      # Accès en HTTP simple sur le réseau local ; à retirer derrière un reverse proxy HTTPS.
+      LUMEN_COOKIE_SECURE: 'false'
+    volumes:
+      - lumen-data:/data
+
   fake-portal:
     build:
       context: .
@@ -24,3 +42,6 @@ services:
       FAKE_PORTAL_SEED: '2'
       FAKE_PORTAL_NAMING_STYLE: plain
       FAKE_PORTAL_LOG_LEVEL: info
+
+volumes:
+  lumen-data:

@@ -2,7 +2,8 @@
 
 Lecteur IPTV (Stalker Portal) centré sur la résilience. Voir [PROJECT.md](PROJECT.md) pour la spécification.
 
-**État : phase 0** — monorepo, outillage, portail Stalker factice et API de chaos.
+**État : phase 2** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
+proxy de lecture, comptes et chiffrement des portails (2).
 
 ## Prérequis
 
@@ -32,16 +33,53 @@ dans `tools/fake-portal/.cache/assets` (20 à 60 s selon la machine). Elles sont
 Avec Docker :
 
 ```sh
-docker compose up --build                  # un portail sur :8080
+docker compose up --build                  # backend sur :8090 + un portail factice sur :8080
 docker compose --profile multi up --build  # + un second portail (:8081), même chaînes, autres noms
 ```
+
+## Le backend
+
+```sh
+# PowerShell : $env:LUMEN_MASTER_KEY = ... ; bash : export LUMEN_MASTER_KEY=...
+LUMEN_MASTER_KEY=$(openssl rand -base64 32) \
+LUMEN_ADMIN_PASSWORD='un-mot-de-passe-long' \
+LUMEN_COOKIE_SECURE=false \
+pnpm server                                 # http://localhost:8090
+```
+
+| Variable                                                 | Rôle                                                                              | Défaut            |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------- | ----------------- |
+| `LUMEN_MASTER_KEY`                                       | **obligatoire** : 32 octets base64, chiffre URL, MAC et identifiants des portails | —                 |
+| `LUMEN_ADMIN_PASSWORD`                                   | crée le compte `admin` au premier démarrage                                       | —                 |
+| `LUMEN_DATABASE_PATH`                                    | base SQLite                                                                       | `./data/lumen.db` |
+| `LUMEN_COOKIE_SECURE`                                    | cookie `Secure` ; `false` pour un accès HTTP en réseau local                      | `true`            |
+| `LUMEN_MAX_STREAMS_PER_USER` / `LUMEN_MAX_STREAMS_TOTAL` | plafonds de lectures simultanées                                                  | `4` / `20`        |
+| `LUMEN_API_REQUESTS_PER_MINUTE`                          | quota par utilisateur                                                             | `600`             |
+| `LUMEN_CATALOG_TTL_MS`                                   | âge avant rafraîchissement du catalogue en arrière-plan                           | 6 h               |
+
+Toutes les variables sont décrites dans [apps/server/src/config.ts](apps/server/src/config.ts).
+**Perdre la clé maître rend les portails enregistrés illisibles** : sauvegardez-la à part.
+
+API (toutes les routes sauf `/api/health` et `/api/auth/login` exigent une session) :
+
+| Route                                                                                                                                         | Rôle                                    |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
+| `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`                                                                           | session par cookie `HttpOnly`           |
+| `POST /api/users`                                                                                                                             | création de compte (admin)              |
+| `GET/POST /api/portals`, `DELETE /api/portals/:id`, `POST /api/portals/:id/sync`                                                              | portails ; l'ajout vérifie l'abonnement |
+| `GET /api/portals/:id/genres`, `…/channels` (ETag, gzip), `…/channels/:cid/logo`, `…/channels/:cid/epg?from&to`, `…/vod?page&category&search` | catalogue                               |
+| `POST /api/playback`, `GET /api/playback/:sid/stream`, `DELETE /api/playback/:sid`                                                            | lecture via le backend                  |
+
+Le navigateur ne voit jamais l'URL du portail, la MAC, les tokens ni les liens de lecture amont.
 
 ## Arborescence
 
 ```
-packages/core/{stalker,sources,catalog,resilience}   logique métier pure (vides en phase 0)
-packages/protocol                                    schémas partagés (vide en phase 0)
-apps/server, apps/web                                backend et client (vides en phase 0)
+packages/core/stalker, sources                       client Stalker, interface SourceProvider
+packages/core/{catalog,resilience}                   phases 5 et 6
+packages/protocol                                    schémas Zod partagés client/serveur
+apps/server                                          backend Fastify
+apps/web                                             client React (phase 4)
 tools/fake-portal                                    portail Stalker factice + chaos
 docker/                                              images
 ```

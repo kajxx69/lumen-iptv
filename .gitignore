@@ -2,6 +2,11 @@ node_modules/
 dist/
 coverage/
 .cache/
+# Base SQLite locale : contient les portails (chiffrés) et les sessions.
+data/
+*.db
+*.db-wal
+*.db-shm
 playwright-report/
 test-results/
 *.log
