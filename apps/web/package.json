@@ -1,0 +1,10 @@
+{
+  "name": "@lumen/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Client web React.",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

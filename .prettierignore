@@ -1,0 +1,7 @@
+dist
+coverage
+.cache
+pnpm-lock.yaml
+playwright-report
+test-results
+PROJECT.md

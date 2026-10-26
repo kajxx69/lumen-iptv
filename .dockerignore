@@ -1,0 +1,7 @@
+**/node_modules
+**/dist
+**/.cache
+**/coverage
+.git
+playwright-report
+test-results

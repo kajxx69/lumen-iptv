@@ -1,0 +1,16 @@
+{
+  "name": "@lumen/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Logique métier pure, sans I/O navigateur ni module Node.",
+  "exports": {
+    "./stalker": "./stalker/index.ts",
+    "./sources": "./sources/index.ts",
+    "./catalog": "./catalog/index.ts",
+    "./resilience": "./resilience/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

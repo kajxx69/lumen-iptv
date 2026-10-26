@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Pas de types Node : le cœur doit compiler sans eux (règle d'or de PROJECT.md).
+    "types": [],
+    "noEmit": true
+  },
+  "include": ["stalker", "sources", "catalog", "resilience"]
+}

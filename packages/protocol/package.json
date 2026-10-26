@@ -1,0 +1,13 @@
+{
+  "name": "@lumen/protocol",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Types et schémas Zod partagés entre client et serveur.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

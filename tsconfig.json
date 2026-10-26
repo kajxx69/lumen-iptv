@@ -1,0 +1,9 @@
+{
+  // Fichiers de configuration à la racine ; chaque paquet a son propre tsconfig.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["*.ts"]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@lumen/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Backend Fastify : API, relais de flux, transcodage.",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}
