@@ -4,6 +4,10 @@ const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const MASTER_KEY_BYTES = 32;
+/** En dessous, le tampon ne couvre même pas une reconnexion. */
+const MIN_RELAY_BUFFER_S = 6;
+const MAX_RELAY_BUFFER_S = 120;
+const MIN_METRICS_TOKEN_LENGTH = 16;
 
 /**
  * Configuration unique du backend, lue depuis LUMEN_*. Chaque seuil est nommé et justifié.
@@ -54,6 +58,53 @@ export const ServerConfigSchema = z.object({
   /** Délai d'obtention des en-têtes de la réponse amont d'un flux. */
   upstreamTimeoutMs: z.coerce.number().int().positive().default(10_000),
 
+  /**
+   * Profondeur du tampon glissant de chaque relais. C'est la durée de coupure amont qu'un
+   * spectateur placé en retard sur le direct traverse sans rien voir (PROJECT.md : 30 s,
+   * 120 s au plus ; ≈ 11 Mo par chaîne SD à 30 s).
+   */
+  relayBufferS: z.coerce.number().min(MIN_RELAY_BUFFER_S).max(MAX_RELAY_BUFFER_S).default(30),
+  /** Durée visée des segments : 2 s équilibre zapping rapide et nombre de requêtes. */
+  relaySegmentTargetS: z.coerce.number().min(1).max(4).default(2),
+  /** Premier segment d'une connexion plus court : la lecture démarre plus tôt. */
+  relayFirstSegmentTargetS: z.coerce.number().min(0.5).max(4).default(1),
+  /**
+   * EXT-X-TARGETDURATION, figée pour la vie d'un relais (RFC 8216). Large pour absorber les
+   * GOP longs de certaines chaînes ; au-delà, le relais coupe sans attendre d'image clé.
+   */
+  relayTargetDurationS: z.coerce.number().int().min(3).max(10).default(6),
+  /**
+   * Sans nouveau segment depuis ce délai, la connexion amont est jugée bloquée et rouverte.
+   * Supérieur à la coupure forcée (durée cible − 0,5 s) pour ne jamais condamner un GOP long.
+   */
+  relayStallTimeoutMs: z.coerce.number().int().positive().default(8000),
+  /** Attente maximale du premier segment au démarrage d'une lecture. */
+  relayStartTimeoutMs: z.coerce.number().int().positive().default(15_000),
+  /** Délai de grâce d'un relais sans spectateur (retour rapide sur la chaîne sans reconnexion). */
+  relayLingerMs: z.coerce.number().int().nonnegative().default(15_000),
+  /** Cache des segments sortis des tampons (lecteurs en retard), tous relais confondus. */
+  relaySegmentCacheBytes: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(128 * 1024 * 1024),
+  /** Politique de reprise (PROJECT.md) : 200 ms, 400 ms, 800 ms… plafonné à 10 s. */
+  relayRetryInitialDelayMs: z.coerce.number().int().positive().default(200),
+  relayRetryMaxDelayMs: z.coerce.number().int().positive().default(10_000),
+  /**
+   * Plafond des tentatives tant que des spectateurs ont encore du tampon : au-delà de 2 s
+   * d'attente, la reprise risquerait d'arriver après la fin de leur tampon.
+   */
+  relayRetryBufferedMaxDelayMs: z.coerce.number().int().positive().default(2000),
+  /** Un segment HLS amont manquant est réessayé jusqu'à ce délai, puis sauté. */
+  hlsSegmentRetryDeadlineMs: z.coerce.number().int().positive().default(4000),
+
+  /**
+   * Jeton exigé par /metrics (en-tête `Authorization: Bearer …`). Sans jeton, /metrics est
+   * désactivé : les métriques ne sortent jamais sans qu'on l'ait décidé.
+   */
+  metricsToken: z.string().min(MIN_METRICS_TOKEN_LENGTH).optional(),
+
   /** Âge au-delà duquel le catalogue est rafraîchi en arrière-plan (servi entre-temps). */
   catalogTtlMs: z.coerce
     .number()
@@ -102,6 +153,19 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
     maxStreamsTotal: 'MAX_STREAMS_TOTAL',
     playbackIdleTtlMs: 'PLAYBACK_IDLE_TTL_MS',
     upstreamTimeoutMs: 'UPSTREAM_TIMEOUT_MS',
+    relayBufferS: 'RELAY_BUFFER_S',
+    relaySegmentTargetS: 'RELAY_SEGMENT_TARGET_S',
+    relayFirstSegmentTargetS: 'RELAY_FIRST_SEGMENT_TARGET_S',
+    relayTargetDurationS: 'RELAY_TARGET_DURATION_S',
+    relayStallTimeoutMs: 'RELAY_STALL_TIMEOUT_MS',
+    relayStartTimeoutMs: 'RELAY_START_TIMEOUT_MS',
+    relayLingerMs: 'RELAY_LINGER_MS',
+    relaySegmentCacheBytes: 'RELAY_SEGMENT_CACHE_BYTES',
+    relayRetryInitialDelayMs: 'RELAY_RETRY_INITIAL_DELAY_MS',
+    relayRetryMaxDelayMs: 'RELAY_RETRY_MAX_DELAY_MS',
+    relayRetryBufferedMaxDelayMs: 'RELAY_RETRY_BUFFERED_MAX_DELAY_MS',
+    hlsSegmentRetryDeadlineMs: 'HLS_SEGMENT_RETRY_DEADLINE_MS',
+    metricsToken: 'METRICS_TOKEN',
     catalogTtlMs: 'CATALOG_TTL_MS',
     epgCacheTtlMs: 'EPG_CACHE_TTL_MS',
     epgMaxWindowMs: 'EPG_MAX_WINDOW_MS',

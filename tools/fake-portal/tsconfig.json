@@ -4,5 +4,5 @@
     "types": ["node"],
     "noEmit": true
   },
-  "include": ["src", "test", "e2e", "vitest.config.ts"]
+  "include": ["src", "test", "e2e", "vitest.config.ts", "vitest.realtime.config.ts"]
 }

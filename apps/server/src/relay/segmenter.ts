@@ -1,0 +1,296 @@
+import {
+  KeyframeScanner,
+  MPEG_CLOCK_HZ,
+  NULL_PID,
+  PAT_PID,
+  type ProgramStreams,
+  TS_PACKET_SIZE,
+  TS_SYNC_BYTE,
+  packetPid,
+  parsePat,
+  parsePmt,
+  payloadOffset,
+  payloadUnitStart,
+  randomAccess,
+  readPesHeader,
+  setContinuityCounter,
+  timestampDelta,
+} from './mpegts.js';
+
+export interface SegmenterOptions {
+  /** Un segment est coupé à la première image clé atteignant cette durée. */
+  targetDurationS: number;
+  /** Durée visée du premier segment d'une connexion : plus court, il démarre la lecture plus tôt. */
+  firstTargetDurationS: number;
+  /** Sans image clé, coupe forcée à cette durée (doit rester sous EXT-X-TARGETDURATION). */
+  forceCutDurationS: number;
+  /** Un écart d'horodatage plus grand est une rupture du flux, pas une image suivante. */
+  timestampJumpS: number;
+  /** En deçà, un segment interrompu par une rupture est jeté plutôt que publié. */
+  minFlushDurationS: number;
+}
+
+export interface SegmentDraft {
+  data: Buffer;
+  durationS: number;
+  /** Commence par une image clé : décodable sans le segment précédent. */
+  independent: boolean;
+  /** Premier segment après une rupture : nouvelle connexion ou saut d'horodatage. */
+  discontinuity: boolean;
+}
+
+export interface SegmenterStats {
+  forcedCuts: number;
+  timestampJumps: number;
+  resyncs: number;
+}
+
+interface PendingKeyframe {
+  /** Index, dans le segment en cours, du paquet qui ouvre l'image. */
+  index: number;
+  ts: number;
+  scanner: KeyframeScanner;
+}
+
+/**
+ * Découpe un flux MPEG-TS continu en segments HLS autonomes : coupe aux images clés,
+ * PAT et PMT en tête de chaque segment, durées tirées des horodatages (jamais de
+ * l'horloge murale). Purement synchrone : les octets entrent, les segments sortent.
+ */
+export class TsSegmenter {
+  readonly stats: SegmenterStats = { forcedCuts: 0, timestampJumps: 0, resyncs: 0 };
+  private carry: Uint8Array = new Uint8Array(0);
+
+  // Tables du programme en cours (réinitialisées à chaque rupture de connexion).
+  private pat: Uint8Array | null = null;
+  private pmt: Uint8Array | null = null;
+  private pmtPid: number | null = null;
+  private streams: ProgramStreams | null = null;
+  /** Un amont qui pose random_access_indicator est cru sur parole : pas d'analyse NAL. */
+  private trustsRai = false;
+  private patCc = 0;
+  private pmtCc = 0;
+
+  // Segment en cours.
+  private packets: Uint8Array[] = [];
+  private startTs: number | null = null;
+  private startIndependent = true;
+  private lastTs: number | null = null;
+  private frameTicks = 0;
+  private pending: PendingKeyframe | null = null;
+  private segmentsSinceBreak = 0;
+  private nextDiscontinuity = false;
+
+  constructor(
+    private readonly options: SegmenterOptions,
+    private readonly emit: (segment: SegmentDraft) => void,
+  ) {}
+
+  push(chunk: Uint8Array): void {
+    const buf = this.carry.length === 0 ? chunk : concat(this.carry, chunk);
+    let off = 0;
+    while (off + TS_PACKET_SIZE <= buf.length) {
+      // Un paquet n'est accepté que si le suivant commence aussi par l'octet de synchronisation :
+      // un 0x47 isolé au milieu de données parasites ne fait pas dérailler le découpage.
+      const next = off + TS_PACKET_SIZE;
+      if (buf[off] === TS_SYNC_BYTE && (next >= buf.length || buf[next] === TS_SYNC_BYTE)) {
+        if (next === buf.length) break; // Dernier paquet : attendre l'octet suivant pour le valider.
+        this.handle(buf.subarray(off, next));
+        off = next;
+        continue;
+      }
+      this.stats.resyncs++;
+      off = this.findSync(buf, off + 1);
+    }
+    this.carry = buf.subarray(off);
+  }
+
+  /**
+   * Fin de la connexion amont (ou changement de source) : le segment en cours est publié
+   * s'il est assez long, et le suivant portera une discontinuité.
+   */
+  breakStream(): void {
+    if (this.carry.length >= TS_PACKET_SIZE && this.carry[0] === TS_SYNC_BYTE) {
+      this.handle(this.carry.subarray(0, TS_PACKET_SIZE));
+    }
+    this.carry = new Uint8Array(0);
+    this.flushPartial();
+    this.nextDiscontinuity = true;
+    this.pat = null;
+    this.pmt = null;
+    this.pmtPid = null;
+    this.streams = null;
+    this.trustsRai = false;
+    this.lastTs = null;
+    this.frameTicks = 0;
+    this.segmentsSinceBreak = 0;
+  }
+
+  private findSync(buf: Uint8Array, from: number): number {
+    for (let i = from; i + TS_PACKET_SIZE <= buf.length; i++) {
+      if (
+        buf[i] === TS_SYNC_BYTE &&
+        (i + TS_PACKET_SIZE >= buf.length || buf[i + TS_PACKET_SIZE] === TS_SYNC_BYTE)
+      )
+        return i;
+    }
+    // Garder la fin : un paquet peut commencer dans les derniers octets.
+    return Math.max(from, buf.length - TS_PACKET_SIZE + 1);
+  }
+
+  private handle(pkt: Uint8Array): void {
+    const pid = packetPid(pkt, 0);
+    if (pid === NULL_PID) return; // Bourrage : des octets payés pour rien sur mobile.
+    if (pid === PAT_PID) {
+      const pmtPid = parsePat(pkt, 0);
+      if (pmtPid !== null) {
+        if (pmtPid !== this.pmtPid) {
+          this.pmt = null;
+          this.streams = null;
+        }
+        this.pmtPid = pmtPid;
+        this.pat = Uint8Array.from(pkt);
+      }
+      return;
+    }
+    if (pid === this.pmtPid) {
+      const streams = parsePmt(pkt, 0);
+      if (streams !== null && (streams.videoPid !== null || streams.audioPids.length > 0)) {
+        this.streams = streams;
+        this.pmt = Uint8Array.from(pkt);
+      }
+      return;
+    }
+    const streams = this.streams;
+    if (streams === null) return; // Indécodable sans PMT.
+
+    const timingPid = streams.videoPid ?? streams.audioPids[0];
+    if (pid === timingPid) {
+      if (payloadUnitStart(pkt, 0)) this.onFrameStart(pkt, streams);
+      else this.continueScan(pkt);
+    }
+    this.packets.push(pkt);
+  }
+
+  private onFrameStart(pkt: Uint8Array, streams: ProgramStreams): void {
+    // Une image précédente encore indécise est différentielle : sa clé n'est jamais venue.
+    this.pending = null;
+    const p = payloadOffset(pkt, 0);
+    const pes = p < 0 ? null : readPesHeader(pkt, p, TS_PACKET_SIZE);
+    const ts = pes?.decodeTs ?? null;
+    if (ts === null || pes === null) return;
+
+    if (this.lastTs !== null) {
+      const delta = timestampDelta(this.lastTs, ts);
+      const jump = this.options.timestampJumpS * MPEG_CLOCK_HZ;
+      if (delta > jump || delta < -jump) {
+        this.stats.timestampJumps++;
+        this.flushPartial();
+        this.nextDiscontinuity = true;
+        this.segmentsSinceBreak = 0;
+      } else if (delta > 0) {
+        this.frameTicks = delta;
+      }
+    }
+    this.lastTs = ts;
+    // Avant la première image clé : ce qui a été reçu est indécodable.
+    if (this.startTs === null) this.packets = [];
+    const index = this.packets.length;
+
+    // Audio seul (radio) : chaque trame est un point d'entrée.
+    const isVideo = packetPid(pkt, 0) === streams.videoPid;
+    if (!isVideo || randomAccess(pkt, 0)) {
+      if (isVideo) this.trustsRai = true;
+      this.onKeyframe(index, ts);
+      return;
+    }
+    if (
+      this.startTs !== null &&
+      timestampDelta(this.startTs, ts) >= this.options.forceCutDurationS * MPEG_CLOCK_HZ
+    ) {
+      this.stats.forcedCuts++;
+      this.cut(index, ts, false);
+      return;
+    }
+    if (this.trustsRai || streams.videoCodec === null) return;
+    const scanner = new KeyframeScanner(streams.videoCodec);
+    const verdict = scanner.feed(pkt.subarray(pes.dataOffset));
+    if (verdict === true) this.onKeyframe(index, ts);
+    else if (verdict === null) this.pending = { index, ts, scanner };
+  }
+
+  private continueScan(pkt: Uint8Array): void {
+    const pending = this.pending;
+    if (pending === null) return;
+    const p = payloadOffset(pkt, 0);
+    if (p < 0) return;
+    const verdict = pending.scanner.feed(pkt.subarray(p));
+    if (verdict === null) return;
+    this.pending = null;
+    if (verdict) this.onKeyframe(pending.index, pending.ts);
+  }
+
+  private onKeyframe(index: number, ts: number): void {
+    if (this.startTs === null) {
+      this.packets = this.packets.slice(index);
+      this.startTs = ts;
+      this.startIndependent = true;
+      return;
+    }
+    const target =
+      this.segmentsSinceBreak === 0 ? this.options.firstTargetDurationS : this.options.targetDurationS;
+    if (timestampDelta(this.startTs, ts) >= target * MPEG_CLOCK_HZ) this.cut(index, ts, true);
+  }
+
+  /** Publie les paquets [0, index) ; le segment suivant commence à `ts`. */
+  private cut(index: number, ts: number, nextIndependent: boolean): void {
+    if (this.startTs === null) return;
+    this.publish(this.packets.slice(0, index), timestampDelta(this.startTs, ts));
+    this.packets = this.packets.slice(index);
+    this.startTs = ts;
+    this.startIndependent = nextIndependent;
+  }
+
+  private flushPartial(): void {
+    if (this.startTs !== null && this.lastTs !== null) {
+      const ticks = timestampDelta(this.startTs, this.lastTs) + this.frameTicks;
+      if (ticks >= this.options.minFlushDurationS * MPEG_CLOCK_HZ) this.publish(this.packets, ticks);
+    }
+    this.packets = [];
+    this.startTs = null;
+    this.pending = null;
+  }
+
+  private publish(packets: Uint8Array[], ticks: number): void {
+    if (this.pat === null || this.pmt === null || packets.length === 0) return;
+    // Copies des tables en tête, avec nos propres compteurs de continuité : les tables de
+    // l'amont sont retirées du corps, la suite reste donc continue d'un segment à l'autre.
+    const pat = Uint8Array.from(this.pat);
+    const pmt = Uint8Array.from(this.pmt);
+    setContinuityCounter(pat, 0, this.patCc);
+    setContinuityCounter(pmt, 0, this.pmtCc);
+    this.patCc = (this.patCc + 1) & 0x0f;
+    this.pmtCc = (this.pmtCc + 1) & 0x0f;
+    const data = Buffer.allocUnsafe((packets.length + 2) * TS_PACKET_SIZE);
+    data.set(pat, 0);
+    data.set(pmt, TS_PACKET_SIZE);
+    packets.forEach((pkt, i) => {
+      data.set(pkt, (i + 2) * TS_PACKET_SIZE);
+    });
+    this.emit({
+      data,
+      durationS: ticks / MPEG_CLOCK_HZ,
+      independent: this.startIndependent,
+      discontinuity: this.nextDiscontinuity,
+    });
+    this.nextDiscontinuity = false;
+    this.segmentsSinceBreak++;
+  }
+}
+
+function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}

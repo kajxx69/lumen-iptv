@@ -68,6 +68,13 @@ export async function createFakePortal(
     },
   });
 
+  // Un portail qui s'arrête coupe ses flux : sans cela, la fermeture attendrait la fin de
+  // flux en direct qui ne finissent jamais.
+  app.addHook('preClose', (done) => {
+    connections.kill(null);
+    done();
+  });
+
   app.get('/_health', () => Promise.resolve({ status: 'ok', name: config.portalName }));
   app.get('/logos/:file', async (req, reply) => {
     const { file } = req.params as { file: string };

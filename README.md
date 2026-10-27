@@ -2,8 +2,8 @@
 
 Lecteur IPTV (Stalker Portal) centré sur la résilience. Voir [PROJECT.md](PROJECT.md) pour la spécification.
 
-**État : phase 2** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
-proxy de lecture, comptes et chiffrement des portails (2).
+**État : phase 3** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
+comptes et chiffrement des portails (2), relais avec tampon glissant et bascule de source (3).
 
 ## Prérequis
 
@@ -22,8 +22,9 @@ FFmpeg doit être dans le `PATH`, ou désigné par `FFMPEG_PATH`. Les tests éch
 ```sh
 pnpm install
 pnpm fake-portal          # portail factice sur http://localhost:8080
-pnpm test                 # tests Vitest (unitaires + chaos)
-pnpm test:e2e             # test Playwright (lance son propre portail sur le port 18080)
+pnpm test                 # tests Vitest : rapides en parallèle, puis temps réel un par un
+pnpm test:fast            # seulement les rapides (pendant le développement)
+pnpm test:e2e             # Playwright : deux portails (18080, 18081) + backend (18090)
 pnpm check                # typecheck + lint + format + tests
 ```
 
@@ -56,6 +57,9 @@ pnpm server                                 # http://localhost:8090
 | `LUMEN_MAX_STREAMS_PER_USER` / `LUMEN_MAX_STREAMS_TOTAL` | plafonds de lectures simultanées                                                  | `4` / `20`        |
 | `LUMEN_API_REQUESTS_PER_MINUTE`                          | quota par utilisateur                                                             | `600`             |
 | `LUMEN_CATALOG_TTL_MS`                                   | âge avant rafraîchissement du catalogue en arrière-plan                           | 6 h               |
+| `LUMEN_RELAY_BUFFER_S`                                   | profondeur du tampon glissant de chaque chaîne (6 à 120 s)                        | `30`              |
+| `LUMEN_RELAY_LINGER_MS`                                  | délai de grâce d'une chaîne sans spectateur                                       | 15 s              |
+| `LUMEN_METRICS_TOKEN`                                    | active `/metrics` (Prometheus) avec ce jeton Bearer, 16 caractères au moins       | désactivé         |
 
 Toutes les variables sont décrites dans [apps/server/src/config.ts](apps/server/src/config.ts).
 **Perdre la clé maître rend les portails enregistrés illisibles** : sauvegardez-la à part.
@@ -68,9 +72,54 @@ API (toutes les routes sauf `/api/health` et `/api/auth/login` exigent une sessi
 | `POST /api/users`                                                                                                                             | création de compte (admin)              |
 | `GET/POST /api/portals`, `DELETE /api/portals/:id`, `POST /api/portals/:id/sync`                                                              | portails ; l'ajout vérifie l'abonnement |
 | `GET /api/portals/:id/genres`, `…/channels` (ETag, gzip), `…/channels/:cid/logo`, `…/channels/:cid/epg?from&to`, `…/vod?page&category&search` | catalogue                               |
-| `POST /api/playback`, `GET /api/playback/:sid/stream`, `DELETE /api/playback/:sid`                                                            | lecture via le backend                  |
+| `POST /api/playback {portalId, channelId, fallbacks?}`, `DELETE /api/playback/:sid`                                                           | lecture via le relais                   |
+| `GET /api/playback/:sid/index.m3u8`, `GET /api/playback/:sid/seg/:n.ts`                                                                       | playlist HLS du relais et ses segments  |
+| `GET /metrics` (jeton `LUMEN_METRICS_TOKEN`, hors session)                                                                                    | métriques Prometheus                    |
 
 Le navigateur ne voit jamais l'URL du portail, la MAC, les tokens ni les liens de lecture amont.
+
+## Le relais
+
+Chaque chaîne regardée a **un** relais, partagé par tous ses spectateurs : une seule connexion
+amont, quel que soit leur nombre (les portails limitent les connexions par MAC).
+
+```
+ Amont (source A, puis B)        Relais                          Lecteur
+ flux TS continu  ──┐            découpeur → segments numérotés   toujours la même URL :
+ ou playlist HLS  ──┴──► entrée ─► tampon glissant (30 s) ───────► /api/playback/<sid>/index.m3u8
+```
+
+- **Le relais fabrique sa propre playlist.** Il découpe le flux amont aux images clés (≈ 2 s,
+  1 s pour le premier segment afin de démarrer vite), place PAT/PMT en tête de chaque segment
+  et numérote lui-même les segments. La numérotation ne dépend jamais de l'amont.
+- **Changement de source** (panne, lien expiré, 403) : la même playlist continue, numéro
+  suivant, avec `EXT-X-DISCONTINUITY` à la jonction ; `EXT-X-DISCONTINUITY-SEQUENCE` glisse
+  avec la fenêtre (RFC 8216). Le lecteur ne se réinitialise pas.
+- **Politique de reprise** : nouveau `create_link` sur la même source, puis source de secours
+  suivante, puis attente exponentielle (200 ms → 10 s, ±20 %). Tant que des spectateurs ont
+  encore du tampon, l'attente est plafonnée à 2 s : la reprise doit arriver avant la fin de
+  leur tampon.
+- Sources de secours : `fallbacks` dans `POST /api/playback` (la même chaîne sur d'autres
+  portails). Leur choix par score de santé arrive en phase 5.
+- Une chaîne quittée garde son relais 15 s (retour instantané), sauf si une autre chaîne du
+  même portail a besoin de la connexion.
+- Segments sortis du tampon : cache LRU commun de 128 Mo (lecteurs en retard).
+
+Mesures sur la machine de développement (tests temps réel) : démarrage 0,9 s, bascule A → B
+0,25 s, 403 → bascule 0,16 s, reprise après coupure ou token expiré 0,7 à 1,3 s. Dans un vrai
+navigateur, hls.js traverse la bascule sans rechargement, sans erreur ni image figée.
+
+### Observabilité
+
+```sh
+# .env : LUMEN_METRICS_TOKEN=<au moins 16 caractères>
+docker compose --profile observability up --build   # Grafana sur http://localhost:3000
+```
+
+Le tableau de bord « Lumen — relais et résilience » (provisionné depuis `docker/grafana/`)
+affiche connexions amont, spectateurs, démarrage et reprise au 95e centile, bascules, pannes par
+type, échecs de `create_link`, bande passante entrante et sortante, mémoire des tampons. Aucune
+métrique ne porte d'identifiant de portail, de chaîne ni d'utilisateur.
 
 ## Arborescence
 
@@ -158,16 +207,28 @@ documentées, surchargeables par `FAKE_PORTAL_*` : `PORT`, `HOST`, `SEED`, `NAMI
 
 ## Tests
 
-| Fichier                 | Couvre                                                                                                                     |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `mpegts.test.ts`        | lecture/écriture PTS, DTS, PCR 33 bits, compteurs de continuité                                                            |
-| `renderer.test.ts`      | continuité des PTS au rebouclage, flux décodable par FFmpeg, gel, noir, corruption                                         |
-| `stalker-api.test.ts`   | authentification, points d'entrée, do_auth, bannissement, catalogue, pagination, EPG, VOD, séries, radio, archive, favoris |
-| `chaos-network.test.ts` | latency, drop, expire-token, http-error, throttle, reset                                                                   |
-| `chaos-content.test.ts` | freeze (octets reçus, PTS figé, reprise), blackscreen (`blackdetect`/`silencedetect`), corrupt (erreurs de décodage)       |
-| `e2e/portal.e2e.ts`     | Playwright : portail lancé comme processus, handshake, HLS, chaos                                                          |
+| Fichier                          | Couvre                                                                                                                     |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `mpegts.test.ts`                 | lecture/écriture PTS, DTS, PCR 33 bits, compteurs de continuité                                                            |
+| `renderer.test.ts`               | continuité des PTS au rebouclage, flux décodable par FFmpeg, gel, noir, corruption                                         |
+| `stalker-api.test.ts`            | authentification, points d'entrée, do_auth, bannissement, catalogue, pagination, EPG, VOD, séries, radio, archive, favoris |
+| `chaos-network.realtime.test.ts` | latency, drop, expire-token, http-error, throttle, reset                                                                   |
+| `chaos-content.realtime.test.ts` | freeze (octets reçus, PTS figé, reprise), blackscreen (`blackdetect`/`silencedetect`), corrupt (erreurs de décodage)       |
+| `e2e/portal.e2e.ts`              | Playwright : portail lancé comme processus, handshake, HLS, chaos                                                          |
 
-Les tests de chaos observent le flux de l'extérieur, en temps réel : comptez une à deux minutes.
+Côté backend (`apps/server/test`) :
+
+| Fichier                     | Couvre                                                                                                    |
+| --------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `relay/segmenter.test.ts`   | découpe aux images clés (drapeau RAI ou analyse H.264), coupe forcée, sauts d'horodatage, resynchro       |
+| `relay/window.test.ts`      | numérotation, éviction, `DISCONTINUITY-SEQUENCE`, playlist exacte, cache LRU                              |
+| `relay/upstream.test.ts`    | lecture des playlists HLS amont, politique de reprise et de bascule                                       |
+| `relay.realtime.test.ts`    | deux portails réels : bascule < 2 s, 403, coupure, token expiré, 50 spectateurs = 1 connexion, libération |
+| `playback.realtime.test.ts` | sessions : quotas, propriétaire, sources de secours, expiration                                           |
+| `e2e/relay-switch.e2e.ts`   | hls.js dans un navigateur : bascule traversée sans rechargement, erreur ni image figée                    |
+
+Les fichiers `*.realtime.test.ts` mesurent des délais réels. `pnpm test` les lance après les
+autres, un par un : une mesure de bascule n'a de valeur que sur une machine calme.
 
 ## Dimensionnement
 
@@ -189,3 +250,12 @@ pourquoi la cible initiale est l'auto-hébergement.
 
 Si la source amont est coupée plus longtemps que la profondeur du tampon et qu'aucune source
 alternative n'existe, la lecture s'arrête. Aucun tampon ne fabrique des images qui n'arrivent pas.
+
+Le tampon du relais ne protège que la part dont le lecteur est en retard sur le direct : un
+lecteur collé au direct n'a que ses propres secondes d'avance. Le placement du lecteur (retard
+visé ≈ 20 s, construit après un démarrage court) est l'objet du tampon client adaptatif (phase 6).
+
+À la jonction entre deux sources, l'image peut sauter de quelques secondes : deux serveurs
+amont ne sont pas synchronisés à l'image près, et la plupart des portails ne donnent aucun
+repère commun. Un segment HLS amont manquant est réessayé sur la même source puis sauté ; le
+redemander à une autre source exigerait des horodatages `PROGRAM-DATE-TIME` fiables des deux côtés.

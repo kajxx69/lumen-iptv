@@ -14,6 +14,8 @@ services:
       LUMEN_ADMIN_PASSWORD: ${LUMEN_ADMIN_PASSWORD:-}
       # Accès en HTTP simple sur le réseau local ; à retirer derrière un reverse proxy HTTPS.
       LUMEN_COOKIE_SECURE: 'false'
+      # Optionnel : active /metrics pour Prometheus (profil observability).
+      LUMEN_METRICS_TOKEN: ${LUMEN_METRICS_TOKEN:-}
     volumes:
       - lumen-data:/data
 
@@ -43,5 +45,36 @@ services:
       FAKE_PORTAL_NAMING_STYLE: plain
       FAKE_PORTAL_LOG_LEVEL: info
 
+  # Observabilité : docker compose --profile observability up
+  # Exige LUMEN_METRICS_TOKEN (16 caractères au moins) dans .env.
+  prometheus:
+    profiles: ['observability']
+    image: prom/prometheus:v3.5.0
+    depends_on:
+      - lumen
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    secrets:
+      - lumen_metrics_token
+
+  grafana:
+    profiles: ['observability']
+    image: grafana/grafana-oss:12.1.1
+    depends_on:
+      - prometheus
+    ports:
+      - '3000:3000'
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+secrets:
+  lumen_metrics_token:
+    environment: LUMEN_METRICS_TOKEN
+
 volumes:
   lumen-data:
+  prometheus-data:
+  grafana-data:

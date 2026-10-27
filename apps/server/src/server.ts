@@ -6,9 +6,13 @@ import type { ServerConfig } from './config.js';
 import { installAuth } from './http/auth.js';
 import { installErrorHandlers } from './http/errors.js';
 import { installHttpHooks } from './http/hooks.js';
+import { MetricsRegistry } from './metrics/registry.js';
 import { PlaybackService } from './playback/playback-service.js';
 import { PortalRegistry, nodeRuntime } from './portals/registry.js';
+import { RelayManager } from './relay/relay-manager.js';
+import { relayManagerOptions } from './relay/relay-options.js';
 import { registerAuthRoutes } from './routes/auth-routes.js';
+import { registerMetricsRoute } from './routes/metrics-route.js';
 import { registerPlaybackRoutes } from './routes/playback-routes.js';
 import { registerPortalRoutes } from './routes/portal-routes.js';
 import { hashPassword } from './security/passwords.js';
@@ -76,7 +80,9 @@ export async function createServer(
   const portalStore = new PortalStore(db, new SecretBox(config.masterKey));
   const registry = new PortalRegistry(portalStore, nodeRuntime(app.log));
   const catalog = new CatalogService(new CatalogStore(db), registry, config, app.log);
-  const playback = new PlaybackService(registry, catalog, config, app.log);
+  const metrics = new MetricsRegistry();
+  const relays = new RelayManager(relayManagerOptions(config), metrics, app.log);
+  const playback = new PlaybackService(registry, catalog, relays, config, app.log);
 
   if (authStore.countUsers() === 0) {
     if (config.adminPassword === undefined) {
@@ -98,6 +104,7 @@ export async function createServer(
   const loginFailures = registerAuthRoutes(app, authStore, config);
   registerPortalRoutes(app, { store: portalStore, registry, catalog, config });
   registerPlaybackRoutes(app, playback);
+  registerMetricsRoute(app, metrics, config);
   app.get('/api/health', () => Promise.resolve({ status: 'ok' }));
   app.get('/', (_req, reply) => reply.type('text/html; charset=utf-8').send(PLACEHOLDER_HTML));
 
@@ -114,6 +121,7 @@ export async function createServer(
     close: async () => {
       clearInterval(housekeeping);
       playback.closeAll();
+      relays.closeAll();
       registry.closeAll();
       await app.close();
       db.close();

@@ -17,6 +17,8 @@ import { FRAME_TICKS, ffmpegAnalyze, sharedAssets } from './helpers.js';
 
 const EPOCH = 1_700_000_000_000;
 const CORRUPT_RATIO = 0.05;
+/** Décodage FFmpeg d'un extrait, sur une machine chargée par les autres suites. */
+const FFMPEG_DECODE_TIMEOUT_MS = 120_000;
 
 describe('SegmentRenderer', () => {
   let assets: MediaAssets;
@@ -88,19 +90,25 @@ describe('SegmentRenderer', () => {
     expect(Buffer.concat(parts).equals(renderer.render('1', 40))).toBe(true);
   });
 
-  it('donne un flux décodable sans erreur par FFmpeg à travers le rebouclage', async () => {
-    const { renderer } = make();
-    const continuity = new ContinuityRewriter();
-    const parts = [segmentsPerLoop - 1, segmentsPerLoop, segmentsPerLoop + 1].map((k) => {
-      const buf = renderer.render('1', k);
-      continuity.rewrite(buf);
-      return buf;
-    });
-    const file = join(await mkdtemp(join(tmpdir(), 'lumen-')), 'wrap.ts');
-    await writeFile(file, Buffer.concat(parts));
-    const log = await ffmpegAnalyze(file, ['-v', 'error']);
-    expect(log.trim()).toBe('');
-  });
+  it(
+    'donne un flux décodable sans erreur par FFmpeg à travers le rebouclage',
+    async () => {
+      const { renderer } = make();
+      const continuity = new ContinuityRewriter();
+      const parts = [segmentsPerLoop - 1, segmentsPerLoop, segmentsPerLoop + 1].map((k) => {
+        const buf = renderer.render('1', k);
+        continuity.rewrite(buf);
+        return buf;
+      });
+      const file = join(await mkdtemp(join(tmpdir(), 'lumen-')), 'wrap.ts');
+      await writeFile(file, Buffer.concat(parts));
+      const log = await ffmpegAnalyze(file, ['-v', 'error']);
+      expect(log.trim()).toBe('');
+      // Décodage complet de 6 s de vidéo : rapide seul, mais FFmpeg partage le CPU avec les
+      // autres suites lancées en parallèle. Le résultat ne dépend pas du temps, seule la durée.
+    },
+    FFMPEG_DECODE_TIMEOUT_MS,
+  );
 
   it('gel : PTS vidéo et audio figés pendant la fenêtre, octets inchangés en volume', () => {
     const { renderer, chaos, timeline } = make();

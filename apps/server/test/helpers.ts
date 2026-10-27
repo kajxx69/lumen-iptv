@@ -1,9 +1,11 @@
+import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { request } from 'node:http';
 import { Writable } from 'node:stream';
 import { type FakePortalConfigInput, type RunningPortal, sendChaos, startPortal } from '@lumen/fake-portal';
-import type { PortalDto } from '@lumen/protocol';
+import type { PlaybackDto, PortalDto } from '@lumen/protocol';
 import { type ServerConfigInput, resolveConfig } from '../src/config.js';
+import { type MediaPlaylist, parsePlaylist } from '../src/relay/hls-parser.js';
 import { type LumenServer, createServer } from '../src/server.js';
 
 export { sendChaos, startPortal, type RunningPortal };
@@ -197,3 +199,77 @@ export function firstBytes(
 }
 
 export const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Réessaie `probe` jusqu'à obtenir une valeur définie ; échoue avec `what` passé le délai. */
+export async function waitFor<T>(
+  what: string,
+  probe: () => Promise<T | undefined>,
+  timeoutMs: number,
+  intervalMs = 100,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await probe();
+    if (value !== undefined) return value;
+    if (Date.now() > deadline) throw new Error(`délai dépassé : ${what}`);
+    await delay(intervalMs);
+  }
+}
+
+export async function startPlayback(
+  client: ApiClient,
+  body: { portalId: string; channelId: string; fallbacks?: { portalId: string; channelId: string }[] },
+): Promise<PlaybackDto> {
+  const res = await client.post<PlaybackDto>('/api/playback', body);
+  if (res.status !== 201) throw new Error(`lecture refusée : ${res.status} ${res.text}`);
+  return res.body;
+}
+
+export interface RelayPlaylist {
+  text: string;
+  playlist: MediaPlaylist;
+}
+
+/** Playlist du relais, analysée comme le ferait un lecteur. */
+export async function readPlaylist(client: ApiClient, url: string): Promise<RelayPlaylist> {
+  const res = await client.get(url);
+  if (res.status !== 200) throw new Error(`playlist : HTTP ${res.status} ${res.text}`);
+  const parsed = parsePlaylist(res.text, `${client.baseUrl}${url}`);
+  if (parsed.kind !== 'media') throw new Error('playlist maîtresse inattendue');
+  return { text: res.text, playlist: parsed };
+}
+
+export async function fetchSegment(client: ApiClient, absoluteUrl: string): Promise<Buffer> {
+  const res = await fetch(absoluteUrl, { headers: { Cookie: client.cookie ?? '' } });
+  if (res.status !== 200) throw new Error(`segment : HTTP ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/** Connexions de flux ouvertes sur le portail factice, par chaîne. */
+export async function activeStreams(portal: RunningPortal, channelId: string): Promise<number> {
+  const state = (await (await fetch(`${portal.baseUrl}/_chaos/state`)).json()) as {
+    activeStreams: Record<string, number>;
+  };
+  return state.activeStreams[channelId] ?? 0;
+}
+
+const FFMPEG = process.env['FFMPEG_PATH'] ?? 'ffmpeg';
+
+/** Décode un segment avec FFmpeg ; renvoie ses erreurs de décodage (chaîne vide si aucune). */
+export function decodeErrors(segment: Buffer): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      FFMPEG,
+      ['-hide_banner', '-nostats', '-v', 'error', '-i', 'pipe:0', '-f', 'null', '-'],
+      {
+        stdio: ['pipe', 'ignore', 'pipe'],
+      },
+    );
+    let stderr = '';
+    child.stderr.on('data', (c: Buffer) => (stderr += c.toString()));
+    child.on('error', reject);
+    child.on('close', () => resolve(stderr.trim()));
+    child.stdin.on('error', () => undefined);
+    child.stdin.end(segment);
+  });
+}

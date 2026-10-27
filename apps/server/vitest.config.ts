@@ -9,6 +9,8 @@ export default defineProject({
   test: {
     name: 'server',
     include: ['test/**/*.test.ts'],
+    // Les tests qui mesurent des délais réels tournent à part (vitest.realtime.config.ts).
+    exclude: ['test/**/*.realtime.test.ts'],
     globalSetup: ['test/global-setup.ts'],
     testTimeout: INTEGRATION_TEST_TIMEOUT_MS,
     hookTimeout: ASSET_GENERATION_TIMEOUT_MS,

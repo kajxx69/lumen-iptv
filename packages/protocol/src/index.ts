@@ -18,6 +18,8 @@ export const ErrorCode = z.enum([
   'portal_auth_failed',
   'portal_error',
   'nothing_to_play',
+  /** Aucune source de la chaîne n'a produit d'image dans le délai de démarrage. */
+  'stream_unavailable',
   'internal',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
@@ -144,14 +146,29 @@ export type VodPageDto = z.infer<typeof VodPageDto>;
 
 // --- Lecture ---
 
-export const PlaybackRequest = z.object({ portalId: z.string().min(1), channelId: z.string().min(1) });
+/**
+ * Sources de secours au plus par lecture : au-delà, une bascule de plus ne sauve plus
+ * rien et chaque essai coûte une connexion amont.
+ */
+export const MAX_FALLBACK_SOURCES = 4;
+
+export const ChannelRef = z.object({ portalId: z.string().min(1), channelId: z.string().min(1) });
+export type ChannelRef = z.infer<typeof ChannelRef>;
+
+export const PlaybackRequest = ChannelRef.extend({
+  /** La même chaîne sur d'autres portails, par ordre de préférence : le relais y bascule en cas de panne. */
+  fallbacks: z.array(ChannelRef).max(MAX_FALLBACK_SOURCES).default([]),
+});
 export type PlaybackRequest = z.infer<typeof PlaybackRequest>;
 
 export const StreamFormat = z.enum(['ts', 'hls']);
 
 export const PlaybackDto = z.object({
   sessionId: z.string(),
-  /** URL relative au backend ; l'URL amont reste côté serveur. */
+  /**
+   * Playlist HLS du relais, relative au backend. Elle ne change jamais pendant la lecture,
+   * même quand le relais change de source ; l'URL amont reste côté serveur.
+   */
   streamUrl: z.string(),
   format: StreamFormat,
 });
