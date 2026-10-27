@@ -28,7 +28,7 @@ export default defineConfig({
     },
     {
       name: 'server',
-      testMatch: 'apps/server/e2e/**/*.e2e.ts',
+      testMatch: ['apps/server/e2e/**/*.e2e.ts', 'apps/web/e2e/**/*.e2e.ts'],
       use: { ...devices['Desktop Chrome'], baseURL: SERVER_URL },
     },
   ],
@@ -54,7 +54,8 @@ export default defineConfig({
       },
     },
     {
-      command: 'pnpm --filter @lumen/server start',
+      // L'interface est construite puis servie par le backend, comme en production.
+      command: 'pnpm --filter @lumen/web build && pnpm --filter @lumen/server start',
       url: `${SERVER_URL}/api/health`,
       reuseExistingServer: false,
       timeout: WEB_SERVER_START_TIMEOUT_MS,

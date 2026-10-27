@@ -12,6 +12,9 @@ import { PortalRegistry, nodeRuntime } from './portals/registry.js';
 import { RelayManager } from './relay/relay-manager.js';
 import { relayManagerOptions } from './relay/relay-options.js';
 import { registerAuthRoutes } from './routes/auth-routes.js';
+import { registerLibraryRoutes } from './routes/library-routes.js';
+import { registerWebRoutes } from './routes/web-routes.js';
+import { LibraryStore } from './store/library-store.js';
 import { registerMetricsRoute } from './routes/metrics-route.js';
 import { registerPlaybackRoutes } from './routes/playback-routes.js';
 import { registerPortalRoutes } from './routes/portal-routes.js';
@@ -35,12 +38,6 @@ export interface CreateServerOptions {
 const HOUSEKEEPING_INTERVAL_MS = 60_000;
 // Les corps de requête de l'API sont de petits objets JSON ; au-delà, c'est un abus.
 const REQUEST_BODY_LIMIT_BYTES = 64 * 1024;
-
-// Page d'attente jusqu'à l'interface web (phase 4). Aucun script : la CSP l'interdirait.
-const PLACEHOLDER_HTML = `<!doctype html>
-<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lumen</title></head>
-<body><h1>Lumen</h1><p>Le serveur fonctionne. L’interface web arrive en phase 4.</p></body></html>`;
 
 /**
  * Journaux structurés : jamais de cookie, d'en-tête d'autorisation ni de requête d'URL
@@ -82,7 +79,8 @@ export async function createServer(
   const catalog = new CatalogService(new CatalogStore(db), registry, config, app.log);
   const metrics = new MetricsRegistry();
   const relays = new RelayManager(relayManagerOptions(config), metrics, app.log);
-  const playback = new PlaybackService(registry, catalog, relays, config, app.log);
+  const library = new LibraryStore(db);
+  const playback = new PlaybackService(registry, catalog, relays, library, config, app.log);
 
   if (authStore.countUsers() === 0) {
     if (config.adminPassword === undefined) {
@@ -104,9 +102,10 @@ export async function createServer(
   const loginFailures = registerAuthRoutes(app, authStore, config);
   registerPortalRoutes(app, { store: portalStore, registry, catalog, config });
   registerPlaybackRoutes(app, playback);
+  registerLibraryRoutes(app, { library, catalog });
   registerMetricsRoute(app, metrics, config);
   app.get('/api/health', () => Promise.resolve({ status: 'ok' }));
-  app.get('/', (_req, reply) => reply.type('text/html; charset=utf-8').send(PLACEHOLDER_HTML));
+  await registerWebRoutes(app, config.webRoot);
 
   const housekeeping = setInterval(() => {
     const now = Date.now();

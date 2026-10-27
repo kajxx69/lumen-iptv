@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 
 const MINUTE = 60_000;
@@ -8,6 +9,7 @@ const MASTER_KEY_BYTES = 32;
 const MIN_RELAY_BUFFER_S = 6;
 const MAX_RELAY_BUFFER_S = 120;
 const MIN_METRICS_TOKEN_LENGTH = 16;
+const DEFAULT_WEB_ROOT = fileURLToPath(new URL('../../web/dist', import.meta.url));
 
 /**
  * Configuration unique du backend, lue depuis LUMEN_*. Chaque seuil est nommé et justifié.
@@ -17,6 +19,8 @@ export const ServerConfigSchema = z.object({
   port: z.coerce.number().int().min(0).max(65535).default(8090),
   /** Fichier SQLite ; `:memory:` pour les tests. */
   databasePath: z.string().default('./data/lumen.db'),
+  /** Build de l'interface web (`pnpm --filter @lumen/web build`), servi sur la même origine. */
+  webRoot: z.string().default(DEFAULT_WEB_ROOT),
   /**
    * Clé maître (32 octets en base64) qui chiffre URL, MAC et identifiants des portails.
    * Obligatoire : sans elle, le serveur refuse de démarrer plutôt que de stocker en clair.
@@ -142,6 +146,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
     host: 'HOST',
     port: 'PORT',
     databasePath: 'DATABASE_PATH',
+    webRoot: 'WEB_ROOT',
     masterKey: 'MASTER_KEY',
     adminUsername: 'ADMIN_USERNAME',
     adminPassword: 'ADMIN_PASSWORD',

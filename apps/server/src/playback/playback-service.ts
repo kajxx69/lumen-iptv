@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ChannelRef, PlaybackDto, PlaybackRequest } from '@lumen/protocol';
+import type { ChannelRef, PlaybackDto, PlaybackRequest, PlaybackStatusDto } from '@lumen/protocol';
 import type { FastifyBaseLogger } from 'fastify';
 import type { CatalogService } from '../catalog/catalog-service.js';
 import type { ServerConfig } from '../config.js';
@@ -8,6 +8,7 @@ import type { PortalRegistry } from '../portals/registry.js';
 import type { Relay, RelaySource } from '../relay/relay.js';
 import type { RelayManager } from '../relay/relay-manager.js';
 import type { AuthUser } from '../store/auth-store.js';
+import type { LibraryStore } from '../store/library-store.js';
 
 /** URI des segments, relative à la playlist : `/api/playback/<id>/seg/<n>.ts`. */
 const segmentUri = (seq: number): string => `seg/${seq}.ts`;
@@ -34,6 +35,7 @@ export class PlaybackService {
     private readonly registry: PortalRegistry,
     private readonly catalog: CatalogService,
     private readonly relays: RelayManager,
+    private readonly library: LibraryStore,
     private readonly config: ServerConfig,
     private readonly log: FastifyBaseLogger,
   ) {
@@ -72,7 +74,15 @@ export class PlaybackService {
       { portal: request.portalId, channel: request.channelId, fallbacks: request.fallbacks.length },
       'lecture démarrée',
     );
+    this.library.touchRecent(user.id, request.portalId, request.channelId, Date.now());
     return { sessionId: id, streamUrl: `/api/playback/${id}/index.m3u8`, format: 'hls' };
+  }
+
+  status(user: AuthUser, sessionId: string): PlaybackStatusDto {
+    const relay = this.owned(user, sessionId).relay;
+    const state = relay.state;
+    // Un relais fermé sous la session (arrêt du serveur) se présente comme en reprise.
+    return { state: state === 'closed' ? 'recovering' : state, ...relay.status };
   }
 
   private async sourceFor(ref: ChannelRef): Promise<RelaySource> {

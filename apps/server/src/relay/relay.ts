@@ -111,6 +111,15 @@ export class Relay {
     return this.window.bytes;
   }
 
+  /** Indicateur de source et de santé pour le lecteur. */
+  get status(): { activeSource: number; sourceCount: number; bufferedS: number } {
+    return {
+      activeSource: Math.max(0, this.sources.indexOf(this.current)),
+      sourceCount: this.sources.length,
+      bufferedS: this.window.bufferedS,
+    };
+  }
+
   get portalIds(): string[] {
     return this.sources.map((s) => s.portalId);
   }

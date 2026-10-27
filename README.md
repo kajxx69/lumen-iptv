@@ -2,8 +2,9 @@
 
 Lecteur IPTV (Stalker Portal) centré sur la résilience. Voir [PROJECT.md](PROJECT.md) pour la spécification.
 
-**État : phase 3** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
-comptes et chiffrement des portails (2), relais avec tampon glissant et bascule de source (3).
+**État : phase 4** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
+comptes et chiffrement des portails (2), relais avec tampon glissant et bascule de source (3),
+client web : catalogue virtualisé, lecteur, guide des programmes, favoris (4).
 
 ## Prérequis
 
@@ -21,6 +22,7 @@ FFmpeg doit être dans le `PATH`, ou désigné par `FFMPEG_PATH`. Les tests éch
 
 ```sh
 pnpm install
+pnpm --filter @lumen/web build   # interface web, servie ensuite par le backend
 pnpm fake-portal          # portail factice sur http://localhost:8080
 pnpm test                 # tests Vitest : rapides en parallèle, puis temps réel un par un
 pnpm test:fast            # seulement les rapides (pendant le développement)
@@ -60,6 +62,7 @@ pnpm server                                 # http://localhost:8090
 | `LUMEN_RELAY_BUFFER_S`                                   | profondeur du tampon glissant de chaque chaîne (6 à 120 s)                        | `30`              |
 | `LUMEN_RELAY_LINGER_MS`                                  | délai de grâce d'une chaîne sans spectateur                                       | 15 s              |
 | `LUMEN_METRICS_TOKEN`                                    | active `/metrics` (Prometheus) avec ce jeton Bearer, 16 caractères au moins       | désactivé         |
+| `LUMEN_WEB_ROOT`                                         | build de l'interface web servi sur la même origine                                | `apps/web/dist`   |
 
 Toutes les variables sont décrites dans [apps/server/src/config.ts](apps/server/src/config.ts).
 **Perdre la clé maître rend les portails enregistrés illisibles** : sauvegardez-la à part.
@@ -74,9 +77,39 @@ API (toutes les routes sauf `/api/health` et `/api/auth/login` exigent une sessi
 | `GET /api/portals/:id/genres`, `…/channels` (ETag, gzip), `…/channels/:cid/logo`, `…/channels/:cid/epg?from&to`, `…/vod?page&category&search` | catalogue                               |
 | `POST /api/playback {portalId, channelId, fallbacks?}`, `DELETE /api/playback/:sid`                                                           | lecture via le relais                   |
 | `GET /api/playback/:sid/index.m3u8`, `GET /api/playback/:sid/seg/:n.ts`                                                                       | playlist HLS du relais et ses segments  |
+| `GET /api/playback/:sid/status`                                                                                                               | état du relais : source active, santé   |
+| `GET /api/portals/:id/epg?channels=a,b&from&to`                                                                                               | EPG groupé (40 chaînes au plus)         |
+| `GET /api/favorites`, `PUT/DELETE /api/favorites/:portalId/:channelId`, `GET /api/recents`                                                    | favoris et récents, par compte          |
 | `GET /metrics` (jeton `LUMEN_METRICS_TOKEN`, hors session)                                                                                    | métriques Prometheus                    |
 
 Le navigateur ne voit jamais l'URL du portail, la MAC, les tokens ni les liens de lecture amont.
+
+## Le client web
+
+React 18, servi par le backend sur la même origine (cookie `SameSite=Strict`, CSP `'self'`, aucun
+CORS). En développement : `pnpm server` puis `pnpm --filter @lumen/web dev` (Vite relaie `/api`).
+
+- **Catalogue à grande échelle.** Liste virtualisée (une soixantaine de lignes dans le DOM, quel
+  que soit le catalogue). Copie IndexedDB par portail : l'application s'ouvre aussitôt, hors ligne
+  compris, puis revalide par ETag (un catalogue inchangé ne coûte qu'une réponse 304).
+- **Recherche locale.** Index inversé maison (préfixes, accents et marqueurs de qualité ignorés,
+  faute de frappe tolérée en second recours) : 36 ms au pire sur 100 000 chaînes.
+- **Lecteur.** hls.js sur la playlist du relais. Erreurs réseau réessayées sans fin, session
+  rouverte si elle disparaît, démarrage réessayé automatiquement. Indicateur de source et de santé.
+  Le lecteur se place peu à peu à 20 s du direct, en jouant à 97 % de la vitesse (imperceptible) :
+  ce retard permet au tampon du relais de couvrir une coupure sans que rien ne se voie.
+- **Guide.** Grille sur 4 h, lignes virtualisées, ligne du présent, fiche du programme. EPG chargé
+  par lots pour les seules lignes visibles.
+- **Favoris et récents** synchronisés entre appareils (stockés par le backend), reprise de la
+  dernière chaîne en un geste depuis l'accueil.
+- **Télécommande.** Tout élément interactif est atteignable aux flèches (navigation spatiale,
+  sans voisins déclarés à la main). Entrée valide, Retour/Échap revient. Dans le lecteur : haut/bas
+  ou Page±/Chaîne± zappent, Espace met en pause.
+- **Hors ligne.** Un service worker sert l'application ; catalogue, portails, favoris et récents
+  viennent de la dernière copie locale.
+- **Données mobiles.** 140 Ko compressés à l'ouverture ; le lecteur (hls.js) n'est téléchargé
+  qu'au lancement d'une chaîne ; fichiers de build en cache un an ; logos chargés à l'approche.
+- Les chaînes marquées « adulte » par le portail sont masquées en attendant le contrôle parental.
 
 ## Le relais
 
@@ -226,6 +259,12 @@ Côté backend (`apps/server/test`) :
 | `relay.realtime.test.ts`    | deux portails réels : bascule < 2 s, 403, coupure, token expiré, 50 spectateurs = 1 connexion, libération |
 | `playback.realtime.test.ts` | sessions : quotas, propriétaire, sources de secours, expiration                                           |
 | `e2e/relay-switch.e2e.ts`   | hls.js dans un navigateur : bascule traversée sans rechargement, erreur ni image figée                    |
+| `library.test.ts`           | favoris par compte, EPG groupé                                                                            |
+
+Côté client web (`apps/web`) : `test/search.test.ts` (recherche, 100 000 entrées < 50 ms),
+`test/logic.test.ts` (navigation spatiale, grille du guide, retard sur le direct) et
+`e2e/app.e2e.ts` (interface réelle : liste virtualisée, recherche, favoris conservés, lecture et
+zapping au clavier, guide, ouverture hors ligne).
 
 Les fichiers `*.realtime.test.ts` mesurent des délais réels. `pnpm test` les lance après les
 autres, un par un : une mesure de bascule n'a de valeur que sur une machine calme.

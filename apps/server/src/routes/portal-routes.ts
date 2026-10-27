@@ -1,5 +1,12 @@
 import { StalkerError } from '@lumen/core/stalker';
-import { CreatePortalRequest, type EpgEntryDto, type PortalDto, type VodPageDto } from '@lumen/protocol';
+import {
+  CreatePortalRequest,
+  EPG_BATCH_MAX_CHANNELS,
+  type EpgBatchDto,
+  type EpgEntryDto,
+  type PortalDto,
+  type VodPageDto,
+} from '@lumen/protocol';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { CatalogService } from '../catalog/catalog-service.js';
@@ -31,6 +38,12 @@ const toDto = (p: PortalRecord): PortalDto => ({
 const PortalParams = z.object({ portalId: z.string().min(1) });
 const ChannelParams = PortalParams.extend({ channelId: z.string().min(1) });
 const EpgQuery = z.object({ from: z.coerce.number().int(), to: z.coerce.number().int() });
+const EpgBatchQuery = EpgQuery.extend({
+  channels: z
+    .string()
+    .transform((s) => [...new Set(s.split(',').filter((id) => id !== ''))])
+    .pipe(z.array(z.string().max(64)).min(1).max(EPG_BATCH_MAX_CHANNELS)),
+});
 const VodQuery = z.object({
   page: z.coerce.number().int().min(1).default(1),
   category: z.string().default('*'),
@@ -144,6 +157,24 @@ export function registerPortalRoutes(
     }
     const entries = await epgCache.get(portalId, channelId, from, to);
     return entries;
+  });
+
+  /**
+   * EPG de plusieurs chaînes en une requête (lignes visibles du guide). Une chaîne en échec
+   * renvoie une liste vide plutôt que de priver les autres de leur programme.
+   */
+  app.get('/api/portals/:portalId/epg', async (req): Promise<EpgBatchDto> => {
+    requireUser(req);
+    const { portalId } = parseOr400(PortalParams, req.params);
+    const { channels, from, to } = parseOr400(EpgBatchQuery, req.query);
+    if (to <= from || to - from > config.epgMaxWindowMs) {
+      throw new ApiError(400, 'bad_request', 'fenêtre EPG invalide ou trop large');
+    }
+    registry.get(portalId);
+    const lists = await Promise.all(
+      channels.map((id) => epgCache.get(portalId, id, from, to).catch((): EpgEntryDto[] => [])),
+    );
+    return Object.fromEntries(channels.map((id, i) => [id, lists[i] ?? []]));
   });
 
   app.get('/api/portals/:portalId/vod', async (req): Promise<VodPageDto> => {

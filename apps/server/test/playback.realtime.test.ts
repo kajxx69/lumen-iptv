@@ -1,4 +1,4 @@
-import type { PlaybackDto } from '@lumen/protocol';
+import type { PlaybackDto, PlaybackStatusDto, RecentDto } from '@lumen/protocol';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type Stack, delay, readPlaylist, sendChaos, startStack } from './helpers.js';
 
@@ -95,6 +95,29 @@ describe('sessions de lecture', () => {
     const segmentPath = new URL(playlist.segments[0]!.uri).pathname;
     expect((await other.get(segmentPath)).status).toBe(404);
     expect((await other.delete(`/api/playback/${playback.sessionId}`)).status).toBe(404);
+  });
+
+  it('chaînes récentes : la dernière regardée en tête, sans doublon', async () => {
+    stack = await startStack({ channelCount: 50 });
+    for (const id of ['1', '2', '1']) {
+      const pb = await start(stack, id);
+      await stack.srv.admin.delete(`/api/playback/${pb.sessionId}`);
+    }
+    const recents = (await stack.srv.admin.get<RecentDto[]>('/api/recents')).body;
+    expect(recents.map((r) => r.channelId)).toEqual(['1', '2']);
+  });
+
+  it('état de lecture : source active, nombre de sources, tampon disponible', async () => {
+    stack = await startStack({ channelCount: 50 });
+    const res = await stack.srv.admin.post<PlaybackDto>('/api/playback', {
+      portalId: stack.portalDto.id,
+      channelId: '1',
+      fallbacks: [{ portalId: stack.portalDto.id, channelId: '2' }],
+    });
+    const status = await stack.srv.admin.get<PlaybackStatusDto>(`/api/playback/${res.body.sessionId}/status`);
+    expect(status.status).toBe(200);
+    expect(status.body).toMatchObject({ state: 'live', activeSource: 0, sourceCount: 2 });
+    expect(status.body.bufferedS).toBeGreaterThan(0);
   });
 
   it('segment hors fenêtre et hors cache : 404 propre', async () => {

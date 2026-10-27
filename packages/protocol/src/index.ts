@@ -124,6 +124,16 @@ export const EpgEntryDto = z.object({
 });
 export type EpgEntryDto = z.infer<typeof EpgEntryDto>;
 
+/**
+ * Chaînes au plus par requête d'EPG groupée : un écran de guide en affiche une vingtaine,
+ * et chaque chaîne absente du cache coûte un appel au portail (limité à 5 par seconde).
+ */
+export const EPG_BATCH_MAX_CHANNELS = 40;
+
+/** EPG de plusieurs chaînes : identifiant de chaîne → programmes de la fenêtre demandée. */
+export const EpgBatchDto = z.record(z.string(), z.array(EpgEntryDto));
+export type EpgBatchDto = z.infer<typeof EpgBatchDto>;
+
 export const VodDto = z.object({
   id: z.string(),
   name: z.string(),
@@ -173,3 +183,28 @@ export const PlaybackDto = z.object({
   format: StreamFormat,
 });
 export type PlaybackDto = z.infer<typeof PlaybackDto>;
+
+export const RelayState = z.enum(['starting', 'live', 'recovering']);
+export type RelayState = z.infer<typeof RelayState>;
+
+/** État du relais vu par le lecteur : indicateur de source et de santé. */
+export const PlaybackStatusDto = z.object({
+  state: RelayState,
+  /** Rang de la source en cours : 0 = celle demandée, 1… = sources de secours. */
+  activeSource: z.number(),
+  sourceCount: z.number(),
+  /** Secondes de flux gardées par le relais, disponibles pour le lecteur. */
+  bufferedS: z.number(),
+});
+export type PlaybackStatusDto = z.infer<typeof PlaybackStatusDto>;
+
+// --- Bibliothèque personnelle (synchronisée entre appareils) ---
+
+export const FavoriteDto = ChannelRef.extend({ addedAt: z.number() });
+export type FavoriteDto = z.infer<typeof FavoriteDto>;
+
+export const RecentDto = ChannelRef.extend({ watchedAt: z.number() });
+export type RecentDto = z.infer<typeof RecentDto>;
+
+/** Chaînes récentes gardées par utilisateur : de quoi remplir l'accueil, pas un historique. */
+export const RECENTS_MAX = 20;

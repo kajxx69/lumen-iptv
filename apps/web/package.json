@@ -5,6 +5,27 @@
   "type": "module",
   "description": "Client web React.",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit && tsc -p e2e/tsconfig.json"
+  },
+  "dependencies": {
+    "@lumen/core": "workspace:*",
+    "@lumen/protocol": "workspace:*",
+    "@tanstack/react-query": "^5.105.0",
+    "@tanstack/react-virtual": "^3.14.23",
+    "dexie": "^4.4.7",
+    "hls.js": "1.6.13",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^4.6.7",
+    "zustand": "^5.0.16"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "vite": "^6.4.5"
   }
 }

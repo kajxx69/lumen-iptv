@@ -1,4 +1,4 @@
-import { PlaybackRequest } from '@lumen/protocol';
+import { PlaybackRequest, type PlaybackStatusDto } from '@lumen/protocol';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireUser } from '../http/auth.js';
@@ -40,6 +40,11 @@ export function registerPlaybackRoutes(app: FastifyInstance, playback: PlaybackS
       .header('Content-Type', TS_CONTENT_TYPE)
       .header('Cache-Control', SEGMENT_CACHE_CONTROL)
       .send(data);
+  });
+
+  app.get('/api/playback/:sessionId/status', (req): PlaybackStatusDto => {
+    const user = requireUser(req);
+    return playback.status(user, parseOr400(SessionParams, req.params).sessionId);
   });
 
   app.delete('/api/playback/:sessionId', async (req, reply) => {

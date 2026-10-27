@@ -2,8 +2,10 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
-    "types": [],
+    // `node` pour vite.config.ts et les tests ; le code de l'application n'utilise que le DOM.
+    "types": ["vite/client", "node"],
+    "jsx": "react-jsx",
     "noEmit": true
   },
-  "include": ["src"]
+  "include": ["src", "test", "vite.config.ts", "vitest.config.ts"]
 }

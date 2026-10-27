@@ -42,6 +42,24 @@ const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX catalog_channels_order ON catalog_channels (portal_id, position);
   `,
+  // Bibliothèque personnelle : synchronisée entre les appareils d'un même compte.
+  `
+  CREATE TABLE favorites (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    portal_id TEXT NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, portal_id, channel_id)
+  );
+  CREATE TABLE recents (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    portal_id TEXT NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL,
+    watched_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, portal_id, channel_id)
+  );
+  CREATE INDEX recents_by_user ON recents (user_id, watched_at);
+  `,
 ];
 
 export function openDatabase(path: string): Db {
