@@ -25,6 +25,9 @@ export class RelayMetrics {
   readonly skippedSegments: Counter;
   readonly bytesIn: Counter;
   readonly bytesOut: Counter;
+  /** Ratio de rebuffering = attente / (lecture + attente), mesuré par les lecteurs. */
+  readonly watchSeconds: Counter;
+  readonly stallSeconds: Counter;
 
   constructor(registry: MetricsRegistry, gauges: RelayGaugeSources) {
     registry.gauge(
@@ -61,5 +64,13 @@ export class RelayMetrics {
     this.skippedSegments = registry.counter('lumen_relay_skipped_segments_total', 'Segments amont sautés');
     this.bytesIn = registry.counter('lumen_relay_bytes_in_total', 'Octets reçus de l’amont');
     this.bytesOut = registry.counter('lumen_relay_bytes_out_total', 'Octets servis aux spectateurs');
+    this.watchSeconds = registry.counter(
+      'lumen_playback_watch_seconds_total',
+      'Temps de lecture vu par les lecteurs (s)',
+    );
+    this.stallSeconds = registry.counter(
+      'lumen_playback_stall_seconds_total',
+      'Temps passé à attendre des données (s)',
+    );
   }
 }

@@ -6,8 +6,14 @@ import type { ServerConfig } from './config.js';
 import { installAuth } from './http/auth.js';
 import { installErrorHandlers } from './http/errors.js';
 import { installHttpHooks } from './http/hooks.js';
+import { registerProcessMetrics } from './metrics/process-metrics.js';
 import { MetricsRegistry } from './metrics/registry.js';
 import { PlaybackService } from './playback/playback-service.js';
+import { PortalHealth } from './portals/portal-health.js';
+import { FfmpegContentAnalyzer } from './resilience/content-analyzer.js';
+import { HealthService } from './resilience/health-service.js';
+import { ProbeScheduler } from './resilience/probe-scheduler.js';
+import { ProbeWorker } from './resilience/probe-worker.js';
 import { PortalRegistry, nodeRuntime } from './portals/registry.js';
 import { RelayManager } from './relay/relay-manager.js';
 import { relayManagerOptions } from './relay/relay-options.js';
@@ -76,11 +82,49 @@ export async function createServer(
   const authStore = new AuthStore(db, config.sessionTtlMs);
   const portalStore = new PortalStore(db, new SecretBox(config.masterKey));
   const registry = new PortalRegistry(portalStore, nodeRuntime(app.log));
-  const catalog = new CatalogService(new CatalogStore(db), registry, config, app.log);
+  const catalogStore = new CatalogStore(db);
+  const catalog = new CatalogService(catalogStore, registry, config, app.log);
+  const portalHealth = new PortalHealth(registry, catalogStore);
   const metrics = new MetricsRegistry();
-  const relays = new RelayManager(relayManagerOptions(config), metrics, app.log);
+  registerProcessMetrics(metrics);
+  const health = new HealthService(db);
+  const content = config.contentDetection
+    ? new FfmpegContentAnalyzer(config.ffmpegPath, config.contentAnalysisMaxConcurrent, () => {
+        app.log.warn('FFmpeg introuvable : détection d’écran noir et de silence désactivée');
+      })
+    : null;
+  const relays = new RelayManager(
+    {
+      ...relayManagerOptions(config),
+      health: (source, event) => {
+        health.record({ portalId: source.portalId, channelId: source.channelId }, event);
+      },
+      ...(content === null ? {} : { content }),
+    },
+    metrics,
+    app.log,
+  );
   const library = new LibraryStore(db);
-  const playback = new PlaybackService(registry, catalog, relays, library, config, app.log);
+  const playback = new PlaybackService(registry, catalog, relays, library, health, config, app.log);
+  const probes = config.probes
+    ? new ProbeWorker(
+        new ProbeScheduler(
+          {
+            favoritesIntervalMs: config.probeFavoritesIntervalMs,
+            catalogStartHour: config.probeCatalogStartHour,
+            catalogEndHour: config.probeCatalogEndHour,
+            catalogProbesPerHour: config.probeCatalogPerHour,
+          },
+          {
+            favorites: () => library.allFavorites(),
+            catalog: () => catalogStore.allChannelRefs(),
+            portalBusy: (portalId) => relays.portalBusy(portalId),
+          },
+        ),
+        { registry, catalog, health, log: app.log },
+      )
+    : null;
+  probes?.start();
 
   if (authStore.countUsers() === 0) {
     if (config.adminPassword === undefined) {
@@ -100,7 +144,7 @@ export async function createServer(
   installHttpHooks(app);
   const quota = installAuth(app, authStore, config);
   const loginFailures = registerAuthRoutes(app, authStore, config);
-  registerPortalRoutes(app, { store: portalStore, registry, catalog, config });
+  registerPortalRoutes(app, { store: portalStore, registry, catalog, config, health: portalHealth });
   registerPlaybackRoutes(app, playback);
   registerLibraryRoutes(app, { library, catalog });
   registerMetricsRoute(app, metrics, config);
@@ -119,10 +163,12 @@ export async function createServer(
     app,
     close: async () => {
       clearInterval(housekeeping);
+      probes?.stop();
       playback.closeAll();
       relays.closeAll();
       registry.closeAll();
       await app.close();
+      health.close();
       db.close();
     },
   };

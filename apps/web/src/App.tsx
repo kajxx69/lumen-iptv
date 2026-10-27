@@ -1,7 +1,7 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { Suspense, lazy, useEffect, useState } from 'react';
 import { onUnauthorized } from './api/client.js';
-import { useMe } from './api/queries.js';
+import { useMe, usePortalHealth } from './api/queries.js';
 import { useDpad } from './nav/use-dpad.js';
 import { GuideScreen } from './screens/GuideScreen.js';
 import { HomeScreen } from './screens/HomeScreen.js';
@@ -40,6 +40,31 @@ const TABS: { label: string; route: Route }[] = [
   { label: 'Réglages', route: { name: 'settings' } },
 ];
 
+const MINUTE_MS = 60_000;
+
+/** « Il y a 12 min », « il y a 3 h » : l'âge du catalogue affiché, en clair. */
+function ago(ms: number): string {
+  const minutes = Math.max(1, Math.round((Date.now() - ms) / MINUTE_MS));
+  return minutes < 90 ? `il y a ${minutes} min` : `il y a ${Math.round(minutes / 60)} h`;
+}
+
+/**
+ * Portail qui ne répond plus : la liste reste utilisable (copie de la dernière
+ * synchronisation) et l'utilisateur sait pourquoi une chaîne pourrait ne pas démarrer.
+ */
+function PortalBanner({ portalId, name }: { portalId: string; name: string }) {
+  const health = usePortalHealth(portalId);
+  if (health.data === undefined || health.data.reachable) return null;
+  const synced = health.data.syncedAt;
+  return (
+    <span className="banner" role="status">
+      Portail « {name} » injoignable
+      {synced === null ? '' : ` : chaînes de la dernière synchronisation (${ago(synced)})`}. Nouvel essai
+      automatique.
+    </span>
+  );
+}
+
 function Header({ current }: { current: Route['name'] }) {
   const online = useOnline();
   const { portal, portals } = useCurrentPortal();
@@ -63,6 +88,7 @@ function Header({ current }: { current: Route['name'] }) {
       ))}
       <span className="spacer" />
       {!online && <span className="banner">Hors ligne : catalogue local</span>}
+      {online && portal !== null && <PortalBanner portalId={portal.id} name={portal.name} />}
       {portals.length > 1 && (
         <button
           type="button"

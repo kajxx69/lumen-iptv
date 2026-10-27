@@ -1,4 +1,4 @@
-import type { PlaybackDto, PortalDto } from '@lumen/protocol';
+import type { ChannelHealthDto, PlaybackDto, PlaybackStatusDto, PortalDto } from '@lumen/protocol';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ServerConfigInput } from '../src/config.js';
 import type { MediaSegment } from '../src/relay/hls-parser.js';
@@ -85,7 +85,39 @@ async function newSegmentsAfter(
   );
 }
 
+/**
+ * Attend le premier segment de la nouvelle source (marqué DISCONTINUITY) au-delà de `after`.
+ * Les segments courts du démarrage rapide de A peuvent encore arriver avant : ce ne sont
+ * pas eux qu'on mesure.
+ */
+async function junctionAfter(
+  d: Dual,
+  pb: PlaybackDto,
+  after: number,
+  timeoutMs: number,
+): Promise<MediaSegment[]> {
+  return waitFor(
+    `jonction après ${after}`,
+    async () => {
+      const fresh = (await segmentsOf(d, pb)).filter((s) => s.seq > after);
+      return fresh.some((s) => s.discontinuity) ? fresh : undefined;
+    },
+    timeoutMs,
+    50,
+  );
+}
+
 const lastSeq = (segments: MediaSegment[]): number => segments.at(-1)?.seq ?? -1;
+
+/** Le flux tel qu'un lecteur l'enchaîne : chaque segment à la suite du précédent. */
+async function decodeChain(d: Dual, segments: MediaSegment[]): Promise<string> {
+  const parts = [];
+  for (const s of segments) parts.push(await fetchSegment(d.srv.admin, s.uri));
+  return decodeErrors(Buffer.concat(parts));
+}
+
+/** Démarrage rapide (RELAY_FAST_START_S, segments de RELAY_FIRST_SEGMENT_TARGET_S) : tolérance d'une image. */
+const FAST_START_SEGMENT_MAX_S = 0.6;
 
 function expectContiguous(segments: MediaSegment[]): void {
   segments.forEach((s, i) => {
@@ -94,7 +126,7 @@ function expectContiguous(segments: MediaSegment[]): void {
 }
 
 describe('relais : lecture de base', () => {
-  it('flux TS : playlist stable, segments de ~2 s décodables seuls, rien de l amont exposé', async () => {
+  it('flux TS : démarrage rapide puis segments de ~2 s, flux décodable, rien de l amont exposé', async () => {
     const d = await dual();
     const t0 = Date.now();
     const pb = await play(d, false);
@@ -105,25 +137,29 @@ describe('relais : lecture de base', () => {
     // Démarrage < 2 s au 95e centile (PROJECT.md) : un seul tirage ici, donc marge réseau locale.
     expect(startupMs).toBeLessThan(2000);
 
+    // Démarrage rapide (2 s de segments courts), puis au moins deux segments de croisière.
     const segments = await waitFor(
-      '3 segments',
+      '6 segments',
       async () => {
         const s = await segmentsOf(d, pb);
-        return s.length >= 3 ? s : undefined;
+        return s.length >= 6 ? s : undefined;
       },
-      15_000,
+      20_000,
     );
     const { text, playlist } = await readPlaylist(d.srv.admin, pb.streamUrl);
     expect(playlist.targetDurationS).toBe(6);
     expect(text).not.toMatch(/play_token|live\.php|127\.0\.0\.1|http:/);
     expectContiguous(segments);
-    for (const s of segments.slice(1)) expect(s.durationS).toBeCloseTo(2, 1);
+    // Le premier segment arrive vite : la lecture démarre sans attendre un GOP entier.
+    expect(segments[0]!.durationS).toBeLessThanOrEqual(FAST_START_SEGMENT_MAX_S);
+    for (const s of segments.slice(-2)) expect(s.durationS).toBeCloseTo(2, 1);
     expect(segments.some((s) => s.discontinuity)).toBe(false);
     for (const s of segments) {
-      const bytes = await fetchSegment(d.srv.admin, s.uri);
-      expect(bytes.length % 188).toBe(0);
-      expect(await decodeErrors(bytes)).toBe('');
+      expect((await fetchSegment(d.srv.admin, s.uri)).length % 188).toBe(0);
     }
+    // Le premier segment se décode seul ; l'ensemble se décode enchaîné, sans erreur.
+    expect(await decodeErrors(await fetchSegment(d.srv.admin, segments[0]!.uri))).toBe('');
+    expect(await decodeChain(d, segments)).toBe('');
   });
 
   it('flux HLS amont : réassemblé dans la playlist du relais, segments décodables', async () => {
@@ -138,9 +174,24 @@ describe('relais : lecture de base', () => {
       15_000,
     );
     expectContiguous(segments);
-    for (const s of segments.slice(-2)) {
-      expect(await decodeErrors(await fetchSegment(d.srv.admin, s.uri))).toBe('');
-    }
+    expect(await decodeChain(d, segments)).toBe('');
+  });
+
+  it('rechargement bloquant : le segment suivant est livré dès sa publication', async () => {
+    const d = await dual();
+    const pb = await play(d, false);
+    const { text, playlist } = await readPlaylist(d.srv.admin, pb.streamUrl);
+    expect(text).toContain('#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES');
+    const next = lastSeq(playlist.segments) + 1;
+    const t0 = Date.now();
+    const blocked = await readPlaylist(d.srv.admin, `${pb.streamUrl}?_HLS_msn=${next}`);
+    const waitedMs = Date.now() - t0;
+    console.log(`rechargement bloquant : réponse après ${waitedMs} ms`);
+    expect(lastSeq(blocked.playlist.segments)).toBeGreaterThanOrEqual(next);
+    // Un segment dure ~2 s : la réponse attend sa publication, pas l'échéance de 8 s.
+    expect(waitedMs).toBeLessThan(4000);
+    // Demande absurde, trop loin dans le futur : refusée.
+    expect((await d.srv.admin.get(`${pb.streamUrl}?_HLS_msn=${next + 50}`)).status).toBe(400);
   });
 
   it('chaîne déjà relayée : un second spectateur démarre avec tout le tampon disponible', async () => {
@@ -172,7 +223,7 @@ describe('relais : pannes amont', () => {
     );
     const t0 = Date.now();
     await sendChaos(d.a.baseUrl, 'drop', { durationMs: 60_000, channelId: CHANNEL });
-    const fresh = await newSegmentsAfter(d, pb, lastSeq(before), 10_000);
+    const fresh = await junctionAfter(d, pb, lastSeq(before), 10_000);
     const switchMs = Date.now() - t0;
     console.log(`bascule A → B (coupure → premier segment de B publié) : ${switchMs} ms`);
 
@@ -228,7 +279,7 @@ describe('relais : pannes amont', () => {
     );
     const t0 = Date.now();
     await sendChaos(d.a.baseUrl, 'expire-token', { killStreams: true });
-    await newSegmentsAfter(d, pb, lastSeq(before), 10_000);
+    await junctionAfter(d, pb, lastSeq(before), 10_000);
     console.log(`reprise après expiration du token : ${Date.now() - t0} ms`);
     expect(Date.now() - t0).toBeLessThan(MAX_SWITCH_MS + 2000);
     expectContiguous(await segmentsOf(d, pb));
@@ -249,7 +300,7 @@ describe('relais : pannes amont', () => {
     const t0 = Date.now();
     // Coupure d'une milliseconde : ferme le flux en cours, la reconnexion tombe sur le 403.
     await sendChaos(d.a.baseUrl, 'drop', { durationMs: 1, channelId: CHANNEL });
-    const fresh = await newSegmentsAfter(d, pb, lastSeq(before), 10_000);
+    const fresh = await junctionAfter(d, pb, lastSeq(before), 10_000);
     const switchMs = Date.now() - t0;
     console.log(`403 → bascule : ${switchMs} ms`);
     expect(fresh.some((s) => s.discontinuity)).toBe(true);
@@ -304,5 +355,89 @@ describe('relais : partage et libération de la connexion amont', () => {
       3000,
     );
     expect(await activeStreams(d.a, '2')).toBe(1);
+  });
+});
+
+describe('moteur de résilience : sources trouvées seules, gel, écran noir, débit', () => {
+  /** Une chaîne de A présente aussi sur B (même identifiant EPG), catalogue de B connu. */
+  async function paired(d: Dual, index = 0): Promise<{ onA: string; onB: string }> {
+    const list = await d.srv.admin.get<{
+      channels: { id: string; epgId: string | null; censored: boolean }[];
+    }>(`/api/portals/${d.dtoA.id}/channels`);
+    const onA = list.body.channels.filter((c) => c.epgId !== null && !c.censored)[index]?.id;
+    if (onA === undefined) throw new Error('aucune chaîne commune');
+    await d.srv.admin.get(`/api/portals/${d.dtoB.id}/channels`);
+    return { onA, onB: String(100_000 + Number(onA)) };
+  }
+
+  const status = async (d: Dual, pb: PlaybackDto): Promise<PlaybackStatusDto> =>
+    (await d.srv.admin.get<PlaybackStatusDto>(`/api/playback/${pb.sessionId}/status`)).body;
+
+  async function timeToSource(
+    d: Dual,
+    pb: PlaybackDto,
+    portalId: string,
+    t0: number,
+    timeoutMs: number,
+  ): Promise<number> {
+    return waitFor(
+      `bascule vers ${portalId}`,
+      async () => {
+        const s = await status(d, pb);
+        return s.activePortalId === portalId && s.state === 'live' ? Date.now() - t0 : undefined;
+      },
+      timeoutMs,
+      50,
+    );
+  }
+
+  it('source de secours trouvée sans le client, par identifiant EPG', async () => {
+    const d = await dual();
+    const { onA } = await paired(d);
+    const pb = await startPlayback(d.srv.admin, { portalId: d.dtoA.id, channelId: onA });
+    expect(await status(d, pb)).toMatchObject({ sourceCount: 2, activePortalId: d.dtoA.id });
+  });
+
+  it('gel des horodatages : détecté en moins de 2,5 s, bascule sur B', async () => {
+    const d = await dual();
+    const { onA } = await paired(d, 1);
+    const pb = await startPlayback(d.srv.admin, { portalId: d.dtoA.id, channelId: onA });
+    await delay(3000);
+    const t0 = Date.now();
+    await sendChaos(d.a.baseUrl, 'freeze', { durationMs: 8000, channelId: onA });
+    const ms = await timeToSource(d, pb, d.dtoB.id, t0, 10_000);
+    console.log(`gel → premier segment de B : ${ms} ms`);
+    expect(ms).toBeLessThan(2500 + MAX_SWITCH_MS);
+  });
+
+  it('écran noir et silence de 15 s : bascule sur B, A déclassée', async () => {
+    const d = await dual();
+    const { onA } = await paired(d, 2);
+    const pb = await startPlayback(d.srv.admin, { portalId: d.dtoA.id, channelId: onA });
+    await delay(3000);
+    const t0 = Date.now();
+    await sendChaos(d.a.baseUrl, 'blackscreen', { durationMs: 15_000, channelId: onA });
+    const ms = await timeToSource(d, pb, d.dtoB.id, t0, 20_000);
+    console.log(`écran noir → premier segment de B : ${ms} ms`);
+    const health = await d.srv.admin.get<ChannelHealthDto>(
+      `/api/portals/${d.dtoA.id}/channels/${onA}/health`,
+    );
+    const score = (portalId: string): number =>
+      health.body.sources.find((s) => s.portalId === portalId)?.score ?? NaN;
+    expect(score(d.dtoA.id)).toBeLessThan(score(d.dtoB.id));
+    // Classement par santé : B passe désormais devant A.
+    expect(health.body.sources[0]?.portalId).toBe(d.dtoB.id);
+  });
+
+  it('débit divisé par 5 sur A : source trop lente, bascule sur B', async () => {
+    const d = await dual();
+    const { onA } = await paired(d, 3);
+    const pb = await startPlayback(d.srv.admin, { portalId: d.dtoA.id, channelId: onA });
+    await delay(4000);
+    const t0 = Date.now();
+    await sendChaos(d.a.baseUrl, 'throttle', { bitrateKbps: 260 });
+    const ms = await timeToSource(d, pb, d.dtoB.id, t0, 15_000);
+    console.log(`débit /5 → premier segment de B : ${ms} ms`);
+    expect(ms).toBeLessThan(8000);
   });
 });

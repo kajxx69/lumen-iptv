@@ -22,6 +22,13 @@ export interface SegmenterOptions {
   targetDurationS: number;
   /** Durée visée du premier segment d'une connexion : plus court, il démarre la lecture plus tôt. */
   firstTargetDurationS: number;
+  /**
+   * Phase de démarrage d'une nouvelle source (zapping, bascule, reconnexion) : pendant ces
+   * secondes de flux, les segments sont coupés à `firstTargetDurationS` sans attendre
+   * l'image clé suivante. Le lecteur, qui n'a presque pas d'avance à ce moment-là, reçoit
+   * la nouvelle source au fil de l'eau plutôt qu'au bout d'un GOP entier. 0 : désactivé.
+   */
+  fastStartS: number;
   /** Sans image clé, coupe forcée à cette durée (doit rester sous EXT-X-TARGETDURATION). */
   forceCutDurationS: number;
   /** Un écart d'horodatage plus grand est une rupture du flux, pas une image suivante. */
@@ -42,6 +49,8 @@ export interface SegmentDraft {
 export interface SegmenterStats {
   forcedCuts: number;
   timestampJumps: number;
+  /** Images dont l'horodatage avance : un flux figé reçoit des octets sans faire monter ce compteur. */
+  timestampAdvances: number;
   resyncs: number;
 }
 
@@ -58,7 +67,7 @@ interface PendingKeyframe {
  * l'horloge murale). Purement synchrone : les octets entrent, les segments sortent.
  */
 export class TsSegmenter {
-  readonly stats: SegmenterStats = { forcedCuts: 0, timestampJumps: 0, resyncs: 0 };
+  readonly stats: SegmenterStats = { forcedCuts: 0, timestampJumps: 0, resyncs: 0, timestampAdvances: 0 };
   private carry: Uint8Array = new Uint8Array(0);
 
   // Tables du programme en cours (réinitialisées à chaque rupture de connexion).
@@ -80,6 +89,8 @@ export class TsSegmenter {
   private pending: PendingKeyframe | null = null;
   private segmentsSinceBreak = 0;
   private nextDiscontinuity = false;
+  /** Horodatage de la première image clé de la source en cours (début du démarrage rapide). */
+  private sourceStartTs: number | null = null;
 
   constructor(
     private readonly options: SegmenterOptions,
@@ -124,6 +135,14 @@ export class TsSegmenter {
     this.lastTs = null;
     this.frameTicks = 0;
     this.segmentsSinceBreak = 0;
+    this.sourceStartTs = null;
+  }
+
+  private inFastStart(ts: number): boolean {
+    return (
+      this.sourceStartTs !== null &&
+      timestampDelta(this.sourceStartTs, ts) < this.options.fastStartS * MPEG_CLOCK_HZ
+    );
   }
 
   private findSync(buf: Uint8Array, from: number): number {
@@ -188,10 +207,12 @@ export class TsSegmenter {
         this.flushPartial();
         this.nextDiscontinuity = true;
         this.segmentsSinceBreak = 0;
+        this.sourceStartTs = null;
       } else if (delta > 0) {
         this.frameTicks = delta;
       }
     }
+    if (this.lastTs === null || timestampDelta(this.lastTs, ts) !== 0) this.stats.timestampAdvances++;
     this.lastTs = ts;
     // Avant la première image clé : ce qui a été reçu est indécodable.
     if (this.startTs === null) this.packets = [];
@@ -202,6 +223,14 @@ export class TsSegmenter {
     if (!isVideo || randomAccess(pkt, 0)) {
       if (isVideo) this.trustsRai = true;
       this.onKeyframe(index, ts);
+      return;
+    }
+    if (
+      this.startTs !== null &&
+      this.inFastStart(ts) &&
+      timestampDelta(this.startTs, ts) >= this.options.firstTargetDurationS * MPEG_CLOCK_HZ
+    ) {
+      this.cut(index, ts, false);
       return;
     }
     if (
@@ -235,10 +264,13 @@ export class TsSegmenter {
       this.packets = this.packets.slice(index);
       this.startTs = ts;
       this.startIndependent = true;
+      this.sourceStartTs ??= ts;
       return;
     }
     const target =
-      this.segmentsSinceBreak === 0 ? this.options.firstTargetDurationS : this.options.targetDurationS;
+      this.segmentsSinceBreak === 0 || this.inFastStart(ts)
+        ? this.options.firstTargetDurationS
+        : this.options.targetDurationS;
     if (timestampDelta(this.startTs, ts) >= target * MPEG_CLOCK_HZ) this.cut(index, ts, true);
   }
 

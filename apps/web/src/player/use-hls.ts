@@ -1,6 +1,8 @@
 import Hls, { type ErrorData } from 'hls.js';
-import { type RefObject, useEffect, useState } from 'react';
-import { liveRate } from './live-delay.js';
+import { type RefObject, useEffect, useRef, useState } from 'react';
+import { AdaptiveBuffer } from './adaptive-buffer.js';
+import { bufferedRanges, stallEscapeTarget } from './gap-jump.js';
+import { LIVE_DELAY, liveRate } from './live-delay.js';
 
 /** Fréquence d'ajustement de la vitesse de lecture (retard sur le direct). */
 const LIVE_DELAY_TICK_MS = 1000;
@@ -11,21 +13,41 @@ const NETWORK_RETRY_BASE_MS = 1000;
 const NETWORK_RETRY_MAX_MS = 8000;
 /** Au-delà de ce nombre de récupérations média ratées, le lecteur est recréé. */
 const MEDIA_RECOVERY_ATTEMPTS = 2;
+/** Avance téléchargée au minimum, et marge au-delà du retard visé. */
+const MIN_BUFFER_AHEAD_S = 30;
+const BUFFER_MARGIN_S = 10;
+/** Temps de lecture et d'attente remontés au serveur à ce rythme (ratio de rebuffering). */
+const STATS_INTERVAL_MS = 30_000;
+/** Surveillance des trous du tampon : une image immobile sur deux relevés suffit à agir. */
+const GAP_CHECK_MS = 100;
+const GAP_STUCK_CHECKS = 2;
+/** Au-delà de ce retard seulement, hls.js revient au direct : bien plus que le tampon maximal (60 s). */
+const MAX_LIVE_LATENCY_S = 120;
+
+export interface PlaybackStats {
+  watchedMs: number;
+  stalledMs: number;
+}
 
 /**
  * Réglages hls.js pour un flux relayé par Lumen (segments de 2 s, tampon serveur de 30 s).
- * - Pas d'accélération pour rattraper le direct : le retard est voulu (voir live-delay).
+ * - Position de départ : le retard visé (20 s, aussi annoncé par le relais en HOLD-BACK).
+ *   Sur un relais déjà chaud, le lecteur part avec 20 s d'avance sur une panne ; sur un
+ *   relais froid, il part du plus ancien segment disponible, puis le retard se construit.
+ * - Pas d'accélération pour rattraper le direct : le retard est voulu.
  * - Latence maximale large : hls.js ne saute jamais en avant (ce serait une coupure).
  * - Tentatives de chargement nombreuses : le relais finit toujours par répondre.
  */
-const HLS_CONFIG: Partial<Hls['config']> = {
-  liveSyncDurationCount: 3,
-  liveMaxLatencyDurationCount: 60,
+export const HLS_CONFIG: Partial<Hls['config']> = {
+  liveSyncDuration: LIVE_DELAY.targetS,
+  liveMaxLatencyDuration: MAX_LIVE_LATENCY_S,
   maxLiveSyncPlaybackRate: 1,
   maxBufferLength: 30,
   backBufferLength: 30,
   enableWorker: true,
-  lowLatencyMode: false,
+  // Rechargement bloquant du relais (CAN-BLOCK-RELOAD) : hls.js ne l'utilise qu'en mode basse
+  // latence. Chaque nouveau segment arrive à l'instant de sa publication, bascule comprise.
+  lowLatencyMode: true,
   manifestLoadingMaxRetry: 6,
   levelLoadingMaxRetry: Infinity,
   fragLoadingMaxRetry: 8,
@@ -58,14 +80,22 @@ export function useHls(
   videoRef: RefObject<HTMLVideoElement | null>,
   streamUrl: string | null,
   onSessionLost: () => void,
+  onStats?: (stats: PlaybackStats) => void,
 ): HlsPlayerState {
   const [stalled, setStalled] = useState(false);
   const [needsGesture, setNeedsGesture] = useState(false);
   const [latencyS, setLatencyS] = useState<number | null>(null);
+  // Référence : le rappel peut changer à chaque rendu sans recréer le lecteur.
+  const statsRef = useRef(onStats);
+  statsRef.current = onStats;
 
   useEffect(() => {
     const video = videoRef.current;
     if (video === null || streamUrl === null) return;
+    const buffer = new AdaptiveBuffer();
+    let started = false;
+    let watchedMs = 0;
+    let lastReport = Date.now();
     let disposed = false;
     let hls: Hls | null = null;
     let networkRetries = 0;
@@ -114,8 +144,10 @@ export function useHls(
         mediaRecoveries = 0;
         create();
       });
-      instance.on(Hls.Events.FRAG_LOADED, () => {
+      instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
         networkRetries = 0;
+        const loading = data.frag.stats.loading;
+        buffer.fragmentLoaded(Date.now(), (loading.end - loading.start) / 1000, data.frag.duration);
       });
       instance.attachMedia(video);
       instance.loadSource(streamUrl);
@@ -123,12 +155,16 @@ export function useHls(
     };
 
     const onWaiting = (): void => {
+      // Une attente après le démarrage est une coupure vue par le spectateur.
+      if (started) buffer.stalled(Date.now());
       clearTimeout(spinnerTimer);
       spinnerTimer = setTimeout(() => {
         setStalled(true);
       }, SPINNER_DELAY_MS);
     };
     const onPlaying = (): void => {
+      if (video.currentTime > 0) started = true;
+      buffer.resumed(Date.now());
       clearTimeout(spinnerTimer);
       setStalled(false);
     };
@@ -136,22 +172,55 @@ export function useHls(
     video.addEventListener('playing', onPlaying);
     video.addEventListener('timeupdate', onPlaying);
 
-    // Retard sur le direct construit en douceur (lecture à 97 % tant qu'il manque).
+    // Retard sur le direct construit en douceur (lecture à 97 % tant qu'il manque), vers une
+    // cible qui s'adapte à l'instabilité mesurée du réseau.
     const tick = setInterval(() => {
+      const now = Date.now();
       const latency = hls?.latency ?? null;
       setLatencyS(latency);
-      const rate = liveRate({
-        latencyS: latency !== null && Number.isFinite(latency) ? latency : null,
-        bufferAheadS: bufferAhead(video),
-        currentRate: video.playbackRate,
-      });
+      const targetS = buffer.targetS(now);
+      const rate = liveRate(
+        {
+          latencyS: latency !== null && Number.isFinite(latency) ? latency : null,
+          bufferAheadS: bufferAhead(video),
+          currentRate: video.playbackRate,
+        },
+        { ...LIVE_DELAY, targetS },
+      );
       if (video.playbackRate !== rate) video.playbackRate = rate;
+      // Téléchargement d'avance à la mesure du retard visé (pilotés, jamais figés : §6).
+      if (hls !== null) hls.config.maxBufferLength = Math.max(MIN_BUFFER_AHEAD_S, targetS + BUFFER_MARGIN_S);
+      if (started && !video.paused) watchedMs += LIVE_DELAY_TICK_MS;
+      if (now - lastReport >= STATS_INTERVAL_MS) {
+        lastReport = now;
+        const stalledMs = buffer.takeStalledMs();
+        if (watchedMs > 0 || stalledMs > 0) statsRef.current?.({ watchedMs, stalledMs });
+        watchedMs = 0;
+      }
     }, LIVE_DELAY_TICK_MS);
+
+    // Image bloquée (changement de source) : débloquée dès qu'elle s'immobilise, voir gap-jump.
+    let lastTime = -1;
+    let stuckChecks = 0;
+    const gapWatch = setInterval(() => {
+      if (video.paused || video.seeking || video.currentTime !== lastTime) {
+        lastTime = video.currentTime;
+        stuckChecks = 0;
+        return;
+      }
+      if (++stuckChecks < GAP_STUCK_CHECKS) return;
+      const target = stallEscapeTarget(bufferedRanges(video.buffered), video.currentTime);
+      if (target !== null) {
+        video.currentTime = target;
+        stuckChecks = 0;
+      }
+    }, GAP_CHECK_MS);
 
     create();
     return () => {
       disposed = true;
       clearInterval(tick);
+      clearInterval(gapWatch);
       clearTimeout(retryTimer);
       clearTimeout(spinnerTimer);
       video.removeEventListener('waiting', onWaiting);

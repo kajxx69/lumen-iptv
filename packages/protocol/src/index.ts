@@ -86,6 +86,16 @@ export const PortalDto = z.object({
 });
 export type PortalDto = z.infer<typeof PortalDto>;
 
+/** Le portail répond-il ? Sinon, le client prévient et sert le catalogue de la dernière synchronisation. */
+export const PortalHealthDto = z.object({
+  portalId: z.string(),
+  reachable: z.boolean(),
+  checkedAt: z.number(),
+  /** Dernière synchronisation réussie du catalogue, null si jamais. */
+  syncedAt: z.number().nullable(),
+});
+export type PortalHealthDto = z.infer<typeof PortalHealthDto>;
+
 // --- Catalogue ---
 
 export const GenreDto = z.object({ id: z.string(), title: z.string(), censored: z.boolean() });
@@ -190,13 +200,43 @@ export type RelayState = z.infer<typeof RelayState>;
 /** État du relais vu par le lecteur : indicateur de source et de santé. */
 export const PlaybackStatusDto = z.object({
   state: RelayState,
-  /** Rang de la source en cours : 0 = celle demandée, 1… = sources de secours. */
+  /** Rang de la source en cours dans le classement par santé (0 = la meilleure au départ). */
   activeSource: z.number(),
+  /** Portail qui fournit l'image en ce moment. */
+  activePortalId: z.string(),
   sourceCount: z.number(),
   /** Secondes de flux gardées par le relais, disponibles pour le lecteur. */
   bufferedS: z.number(),
 });
 export type PlaybackStatusDto = z.infer<typeof PlaybackStatusDto>;
+
+/** Plafond d'un relevé : le lecteur en envoie toutes les 30 s ; au-delà, la valeur est suspecte. */
+const STATS_MAX_MS = 10 * 60_000;
+
+/** Ce que le spectateur a vécu depuis le dernier relevé : base du ratio de rebuffering. */
+export const PlaybackStatsRequest = z.object({
+  watchedMs: z.number().int().min(0).max(STATS_MAX_MS),
+  stalledMs: z.number().int().min(0).max(STATS_MAX_MS),
+});
+export type PlaybackStatsRequest = z.infer<typeof PlaybackStatsRequest>;
+
+/** Santé d'une source (une chaîne sur un portail), PROJECT.md §3. */
+export const SourceHealthDto = ChannelRef.extend({
+  resolveLatencyMs: z.number(),
+  timeToFirstByteMs: z.number(),
+  segmentFailureRate: z.number(),
+  bitrateJitter: z.number(),
+  freezeEventsPerHour: z.number(),
+  contentEventsPerHour: z.number(),
+  uptime24h: z.number(),
+  samples: z.number(),
+  score: z.number(),
+});
+export type SourceHealthDto = z.infer<typeof SourceHealthDto>;
+
+/** Toutes les sources connues d'une chaîne, de la meilleure à la moins bonne. */
+export const ChannelHealthDto = z.object({ sources: z.array(SourceHealthDto) });
+export type ChannelHealthDto = z.infer<typeof ChannelHealthDto>;
 
 // --- Bibliothèque personnelle (synchronisée entre appareils) ---
 

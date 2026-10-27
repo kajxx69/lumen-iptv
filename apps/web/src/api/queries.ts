@@ -4,6 +4,7 @@ import {
   type LoginRequest,
   MeDto,
   PortalDto,
+  PortalHealthDto,
   RecentDto,
 } from '@lumen/protocol';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -162,6 +163,24 @@ export function useToggleFavorite() {
       client.setQueryData(favoritesKey, context?.previous);
     },
     onSettled: () => client.invalidateQueries({ queryKey: favoritesKey }),
+  });
+}
+
+/**
+ * Le portail répond-il ? Revérifié chaque minute ; la réponse vient vite (délai court côté
+ * serveur). Injoignable, il est revérifié plus souvent pour retirer le message dès son retour.
+ */
+const PORTAL_HEALTH_REFRESH_MS = 60_000;
+const PORTAL_DOWN_REFRESH_MS = 15_000;
+
+export function usePortalHealth(portalId: string | null) {
+  return useQuery({
+    queryKey: ['portal-health', portalId],
+    queryFn: () => requestJson(PortalHealthDto, `/api/portals/${encodeURIComponent(portalId ?? '')}/health`),
+    enabled: portalId !== null,
+    refetchInterval: (query) =>
+      query.state.data?.reachable === false ? PORTAL_DOWN_REFRESH_MS : PORTAL_HEALTH_REFRESH_MS,
+    retry: false,
   });
 }
 

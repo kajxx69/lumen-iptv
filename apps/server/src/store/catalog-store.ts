@@ -50,6 +50,28 @@ export class CatalogStore {
     return row === undefined ? null : (JSON.parse(row.data) as StoredChannel);
   }
 
+  /**
+   * La même chaîne sur les autres portails, reconnue à son identifiant EPG : le signal le
+   * plus fiable entre deux portails (PROJECT.md). La fusion complète arrive en phase 6.
+   */
+  findByEpgId(epgId: string, excludePortalId: string): { portalId: string; channelId: string }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT portal_id, channel_id FROM catalog_channels
+         WHERE portal_id <> ? AND json_extract(data, '$.epgId') = ? ORDER BY portal_id, position`,
+      )
+      .all(excludePortalId, epgId) as { portal_id: string; channel_id: string }[];
+    return rows.map((r) => ({ portalId: r.portal_id, channelId: r.channel_id }));
+  }
+
+  /** Toutes les chaînes connues, dans l'ordre des portails : le balayage nocturne des sondes. */
+  allChannelRefs(): { portalId: string; channelId: string }[] {
+    const rows = this.db
+      .prepare('SELECT portal_id, channel_id FROM catalog_channels ORDER BY portal_id, position')
+      .all() as { portal_id: string; channel_id: string }[];
+    return rows.map((r) => ({ portalId: r.portal_id, channelId: r.channel_id }));
+  }
+
   /** Remplacement atomique : un client ne voit jamais un catalogue à moitié écrit. */
   replace(
     portalId: string,

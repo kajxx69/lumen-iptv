@@ -1,25 +1,39 @@
 import type { ChannelDto, PlaybackStatusDto } from '@lumen/protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { favoriteKey, useFavorites, useToggleFavorite } from '../api/queries.js';
+import { favoriteKey, useFavorites, usePortals, useToggleFavorite } from '../api/queries.js';
 import { useCatalog } from '../catalog/use-catalog.js';
 import { ChannelLogo } from '../components/ChannelLogo.js';
 import { useEpg } from '../epg/epg-store.js';
 import { formatTime, nowNext } from '../epg/layout.js';
 import { actionForKey } from '../nav/spatial.js';
 import { focusDefault } from '../nav/use-dpad.js';
-import { useHls } from '../player/use-hls.js';
+import { type PlaybackStats, useHls } from '../player/use-hls.js';
+import { request } from '../api/client.js';
 import { usePlaybackSession } from '../player/use-playback-session.js';
 import { goBack, navigate } from '../state/router.js';
 
 /** Les commandes s'effacent après ce délai sans action : l'image d'abord. */
 const OVERLAY_HIDE_MS = 4000;
 
-function sourceLabel(status: PlaybackStatusDto | null): { text: string; warn: boolean } {
+/**
+ * Indicateur de source et de santé. Quand l'image vient d'un autre portail que celui
+ * choisi (bascule automatique), il le nomme : le spectateur comprend ce qui se passe.
+ */
+function sourceLabel(
+  status: PlaybackStatusDto | null,
+  requestedPortalId: string,
+  portalName: (id: string) => string,
+): { text: string; warn: boolean } {
   if (status === null) return { text: 'Connexion…', warn: true };
-  const source = status.sourceCount > 1 ? ` · source ${status.activeSource + 1}/${status.sourceCount}` : '';
+  const elsewhere = status.activePortalId !== requestedPortalId;
+  const source = elsewhere
+    ? ` · secours : ${portalName(status.activePortalId)}`
+    : status.sourceCount > 1
+      ? ` · ${status.sourceCount - 1} secours prêt${status.sourceCount > 2 ? 's' : ''}`
+      : '';
   if (status.state === 'recovering') return { text: `Reprise en cours${source}`, warn: true };
   if (status.state === 'starting') return { text: `Démarrage${source}`, warn: true };
-  return { text: `En direct${source}`, warn: status.activeSource > 0 };
+  return { text: `En direct${source}`, warn: elsewhere };
 }
 
 /** Chaîne voisine dans la liste (genre de la chaîne en cours), en boucle. */
@@ -41,10 +55,23 @@ export function WatchScreen({ portalId, channelId }: { portalId: string; channel
   const channel = catalog?.byId.get(channelId);
   const session = usePlaybackSession(portalId, channelId);
   const streamUrl = session.state.kind === 'ready' ? session.state.playback.streamUrl : null;
-  const player = useHls(videoRef, streamUrl, session.restart);
+  const sessionId = session.state.kind === 'ready' ? session.state.playback.sessionId : null;
+  const reportStats = useCallback(
+    (stats: PlaybackStats) => {
+      if (sessionId === null) return;
+      // Ratio de rebuffering côté serveur : sans réponse attendue, sans nouvel essai.
+      void request(`/api/playback/${encodeURIComponent(sessionId)}/stats`, {
+        method: 'POST',
+        body: stats,
+      }).catch(() => undefined);
+    },
+    [sessionId],
+  );
+  const player = useHls(videoRef, streamUrl, session.restart, reportStats);
   const epg = useEpg(portalId, [channelId]);
   const programme = nowNext(epg(channelId) ?? [], Date.now());
   const favorites = useFavorites();
+  const portals = usePortals();
   const toggle = useToggleFavorite();
   const favorite = (favorites.data ?? []).some(
     (f) => favoriteKey(f.portalId, f.channelId) === favoriteKey(portalId, channelId),
@@ -116,11 +143,22 @@ export function WatchScreen({ portalId, channelId }: { portalId: string; channel
     };
   }, [overlay, zap, showOverlay]);
 
-  const source = sourceLabel(session.status);
+  const source = sourceLabel(
+    session.status,
+    portalId,
+    (id) => portals.data?.find((p) => p.id === id)?.name ?? 'autre portail',
+  );
   const title = channel === undefined ? 'Chaîne' : `${channel.number}. ${channel.name}`;
 
   return (
-    <div className="player" onMouseMove={showOverlay} onClick={showOverlay} data-testid="player">
+    <div
+      className="player"
+      onMouseMove={showOverlay}
+      onClick={showOverlay}
+      data-testid="player"
+      // Identifiant de la session de lecture : diagnostic et tests de chaos (rien de secret).
+      data-session={session.state.kind === 'ready' ? session.state.playback.sessionId : undefined}
+    >
       <video ref={videoRef} playsInline aria-label={`Lecture : ${title}`} />
       {player.stalled && session.state.kind === 'ready' && (
         <div className="spinner" role="status" aria-label="Chargement" />

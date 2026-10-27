@@ -3,7 +3,7 @@ import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
-import type { ChannelListDto, EpgEntryDto, GenreDto, VodPageDto } from '@lumen/protocol';
+import type { ChannelListDto, EpgEntryDto, GenreDto, PortalHealthDto, VodPageDto } from '@lumen/protocol';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   ADMIN,
@@ -12,6 +12,7 @@ import {
   type Stack,
   addPortal,
   delay,
+  sendChaos,
   startPortal,
   startServer,
   startStack,
@@ -156,6 +157,18 @@ describe('cache du catalogue', () => {
     await delay(1500);
     const fresh = await stack.srv.admin.get<ChannelListDto>(path);
     expect(fresh.body.syncedAt).toBeGreaterThan(first.body.syncedAt);
+  });
+
+  it('portail tombé juste après une vérification réussie : la panne se voit aussitôt', async () => {
+    const s = await startStack({ channelCount: 50 });
+    stack = s;
+    const health = async (): Promise<boolean> =>
+      (await s.srv.admin.get<PortalHealthDto>(`/api/portals/${s.portalDto.id}/health`)).body.reachable;
+    expect(await health()).toBe(true);
+    await sendChaos(s.portal.baseUrl, 'http-error', { code: 503, probability: 1, scope: 'all' });
+    expect(await health()).toBe(false);
+    await sendChaos(s.portal.baseUrl, 'reset');
+    expect(await health()).toBe(true);
   });
 
   it('synchronisation forcée par l admin', async () => {

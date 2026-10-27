@@ -14,6 +14,14 @@ export class LibraryStore {
     return rows.map((r) => ({ portalId: r.portal_id, channelId: r.channel_id, addedAt: r.added_at }));
   }
 
+  /** Favoris de tous les comptes, sans doublon : ce sont les chaînes sondées en priorité. */
+  allFavorites(): { portalId: string; channelId: string }[] {
+    const rows = this.db
+      .prepare('SELECT DISTINCT portal_id, channel_id FROM favorites ORDER BY portal_id, channel_id')
+      .all() as { portal_id: string; channel_id: string }[];
+    return rows.map((r) => ({ portalId: r.portal_id, channelId: r.channel_id }));
+  }
+
   /** Idempotent : un favori déjà présent garde sa place. */
   addFavorite(userId: string, portalId: string, channelId: string, now: number): void {
     this.db

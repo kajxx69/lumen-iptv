@@ -70,8 +70,13 @@ export const ServerConfigSchema = z.object({
   relayBufferS: z.coerce.number().min(MIN_RELAY_BUFFER_S).max(MAX_RELAY_BUFFER_S).default(30),
   /** Durée visée des segments : 2 s équilibre zapping rapide et nombre de requêtes. */
   relaySegmentTargetS: z.coerce.number().min(1).max(4).default(2),
-  /** Premier segment d'une connexion plus court : la lecture démarre plus tôt. */
-  relayFirstSegmentTargetS: z.coerce.number().min(0.5).max(4).default(1),
+  /** Premiers segments d'une nouvelle source plus courts : la lecture démarre (ou reprend) plus tôt. */
+  relayFirstSegmentTargetS: z.coerce.number().min(0.5).max(4).default(0.5),
+  /**
+   * Démarrage rapide d'une nouvelle source (zapping, bascule) : pendant ces secondes, coupe
+   * sans attendre l'image clé. Le lecteur n'attend pas un GOP entier pour recevoir la suite.
+   */
+  relayFastStartS: z.coerce.number().min(0).max(10).default(2),
   /**
    * EXT-X-TARGETDURATION, figée pour la vie d'un relais (RFC 8216). Large pour absorber les
    * GOP longs de certaines chaînes ; au-delà, le relais coupe sans attendre d'image clé.
@@ -102,6 +107,34 @@ export const ServerConfigSchema = z.object({
   relayRetryBufferedMaxDelayMs: z.coerce.number().int().positive().default(2000),
   /** Un segment HLS amont manquant est réessayé jusqu'à ce délai, puis sauté. */
   hlsSegmentRetryDeadlineMs: z.coerce.number().int().positive().default(4000),
+
+  /**
+   * Gel : octets reçus mais horodatages figés depuis ce délai. PROJECT.md exige une détection
+   * en moins de 2,5 s : 2 s plus la période de vérification (250 ms) tiennent cette cible. C'est
+   * la panne que les lecteurs classiques ne voient jamais : la connexion vit, l'image est figée.
+   */
+  freezeDetectionMs: z.coerce.number().int().positive().default(2000),
+  /** Image noire ou silence prolongé au-delà de cette durée (PROJECT.md : 10 s). */
+  contentFailureS: z.coerce.number().positive().default(10),
+  /** Analyse d'image et de son par FFmpeg (un processus par segment, quelques % de CPU). */
+  contentDetection: z.boolean().default(true),
+  /** Analyses FFmpeg simultanées pour tout le serveur : le reste attend son tour ou est sauté. */
+  contentAnalysisMaxConcurrent: z.coerce.number().int().positive().default(2),
+  ffmpegPath: z.string().default('ffmpeg'),
+
+  /** Sondes de fond : connaître l'état d'une chaîne avant que l'utilisateur ne clique dessus. */
+  probes: z.boolean().default(true),
+  /** Chaque favori est sondé à ce rythme (PROJECT.md : 15 min). */
+  probeFavoritesIntervalMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(15 * MINUTE),
+  /** Balayage du catalogue complet la nuit, heures locales [début, fin) : réseau et portail au calme. */
+  probeCatalogStartHour: z.coerce.number().int().min(0).max(23).default(3),
+  probeCatalogEndHour: z.coerce.number().int().min(1).max(24).default(6),
+  /** 600 sondes par heure (une toutes les 6 s) : invisible pour le portail, 5 000 chaînes en 3 nuits. */
+  probeCatalogPerHour: z.coerce.number().int().positive().default(600),
 
   /**
    * Jeton exigé par /metrics (en-tête `Authorization: Bearer …`). Sans jeton, /metrics est
@@ -161,6 +194,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
     relayBufferS: 'RELAY_BUFFER_S',
     relaySegmentTargetS: 'RELAY_SEGMENT_TARGET_S',
     relayFirstSegmentTargetS: 'RELAY_FIRST_SEGMENT_TARGET_S',
+    relayFastStartS: 'RELAY_FAST_START_S',
     relayTargetDurationS: 'RELAY_TARGET_DURATION_S',
     relayStallTimeoutMs: 'RELAY_STALL_TIMEOUT_MS',
     relayStartTimeoutMs: 'RELAY_START_TIMEOUT_MS',
@@ -170,6 +204,14 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
     relayRetryMaxDelayMs: 'RELAY_RETRY_MAX_DELAY_MS',
     relayRetryBufferedMaxDelayMs: 'RELAY_RETRY_BUFFERED_MAX_DELAY_MS',
     hlsSegmentRetryDeadlineMs: 'HLS_SEGMENT_RETRY_DEADLINE_MS',
+    freezeDetectionMs: 'FREEZE_DETECTION_MS',
+    contentFailureS: 'CONTENT_FAILURE_S',
+    contentAnalysisMaxConcurrent: 'CONTENT_ANALYSIS_MAX_CONCURRENT',
+    ffmpegPath: 'FFMPEG_PATH',
+    probeFavoritesIntervalMs: 'PROBE_FAVORITES_INTERVAL_MS',
+    probeCatalogStartHour: 'PROBE_CATALOG_START_HOUR',
+    probeCatalogEndHour: 'PROBE_CATALOG_END_HOUR',
+    probeCatalogPerHour: 'PROBE_CATALOG_PER_HOUR',
     metricsToken: 'METRICS_TOKEN',
     catalogTtlMs: 'CATALOG_TTL_MS',
     epgCacheTtlMs: 'EPG_CACHE_TTL_MS',
@@ -185,10 +227,16 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
   for (const [field, key] of [
     ['cookieSecure', 'COOKIE_SECURE'],
     ['trustProxy', 'TRUST_PROXY'],
+    ['contentDetection', 'CONTENT_DETECTION'],
+    ['probes', 'PROBES'],
   ] as const) {
     const v = env[`LUMEN_${key}`];
     if (v !== undefined && v !== '') input[field] = bool(v);
   }
+  // Même variable que le portail factice et les tests : FFmpeg n'est configuré qu'une fois.
+  const ffmpeg = env['FFMPEG_PATH'];
+  if (input['ffmpegPath'] === undefined && ffmpeg !== undefined && ffmpeg !== '')
+    input['ffmpegPath'] = ffmpeg;
   return ServerConfigSchema.parse(input);
 }
 

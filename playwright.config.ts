@@ -8,14 +8,16 @@ const SERVER_PORT = Number(process.env['LUMEN_E2E_PORT'] ?? 18090);
 const FAKE_PORTAL_URL = `http://127.0.0.1:${FAKE_PORTAL_PORT}`;
 const FAKE_PORTAL_B_URL = `http://127.0.0.1:${FAKE_PORTAL_B_PORT}`;
 const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
-// La première génération des mires FFmpeg prend quelques dizaines de secondes.
-const WEB_SERVER_START_TIMEOUT_MS = 180_000;
+// Première génération des mires FFmpeg, ou construction de l'interface sur une machine chargée.
+const WEB_SERVER_START_TIMEOUT_MS = 300_000;
 // Secrets jetables, propres à cette exécution. La configuration est réévaluée dans chaque
 // processus de test : on ne tire la valeur qu'une fois, les autres l'héritent.
 process.env['E2E_ADMIN_PASSWORD'] ??= randomBytes(12).toString('hex');
 process.env['E2E_FAKE_PORTAL_URL'] = FAKE_PORTAL_URL;
 process.env['E2E_FAKE_PORTAL_B_URL'] = FAKE_PORTAL_B_URL;
 const ADMIN_PASSWORD = process.env['E2E_ADMIN_PASSWORD'];
+process.env['E2E_METRICS_TOKEN'] ??= randomBytes(16).toString('hex');
+const METRICS_TOKEN = process.env['E2E_METRICS_TOKEN'];
 
 export default defineConfig({
   fullyParallel: false,
@@ -67,6 +69,12 @@ export default defineConfig({
         LUMEN_ADMIN_PASSWORD: ADMIN_PASSWORD,
         LUMEN_COOKIE_SECURE: 'false',
         LUMEN_LOG_LEVEL: 'warn',
+        // Le test « 50 spectateurs » lit la charge CPU du serveur sur /metrics, et ouvre ses
+        // 50 lectures avec un seul compte : plafonds par compte relevés pour lui.
+        LUMEN_METRICS_TOKEN: METRICS_TOKEN,
+        LUMEN_MAX_STREAMS_PER_USER: '60',
+        LUMEN_MAX_STREAMS_TOTAL: '80',
+        LUMEN_API_REQUESTS_PER_MINUTE: '20000',
       },
     },
   ],

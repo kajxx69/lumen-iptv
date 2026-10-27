@@ -98,7 +98,13 @@ test('bascule de source pendant la lecture : hls.js continue sans réinitialisat
     video.muted = true;
     video.autoplay = true;
     // Par-dessus l'application : Chrome ne lance pas une vidéo muette située hors de l'écran.
-    Object.assign(video.style, { position: 'fixed', inset: '0', width: '100%', height: '100%', zIndex: '100' });
+    Object.assign(video.style, {
+      position: 'fixed',
+      inset: '0',
+      width: '100%',
+      height: '100%',
+      zIndex: '100',
+    });
     document.body.append(video);
     const report: PlayerReport = {
       manifestLoads: 0,

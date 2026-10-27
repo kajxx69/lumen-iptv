@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import type { HealthEvent } from '@lumen/core/resilience';
 import type { FastifyBaseLogger } from 'fastify';
+import type { ContentAnalyzer } from '../resilience/content-analyzer.js';
 import { type FailoverOptions, FailoverPolicy } from './failover.js';
 import { renderPlaylist } from './playlist.js';
 import type { RelayMetrics } from './relay-metrics.js';
@@ -13,8 +15,21 @@ export interface RelaySource {
   /** Identifiant interne `portail:chaîne`, sans secret : seul repère dans les journaux. */
   id: string;
   portalId: string;
+  channelId: string;
   /** create_link : un lien neuf à chaque connexion (les liens amont expirent vite). */
   resolve(): Promise<UpstreamLink>;
+}
+
+/** Détection de panne au-delà du réseau (PROJECT.md, moteur de résilience §2). */
+export interface DetectionOptions {
+  /** Octets reçus mais horodatages figés depuis ce délai : flux gelé (cible : 2,5 s). */
+  freezeMs: number;
+  /** Image noire ou silence cumulés au-delà : panne de contenu (cible : 10 s). */
+  contentFailureS: number;
+  /** Débit reçu sous cette part du débit du flux : source trop lente pour tenir le direct. */
+  slowRatio: number;
+  /** Fenêtre de mesure du débit reçu. */
+  slowWindowMs: number;
 }
 
 export interface RelayOptions {
@@ -22,17 +37,24 @@ export interface RelayOptions {
   bufferS: number;
   /** EXT-X-TARGETDURATION, fixe pour toute la vie du relais. */
   targetDurationS: number;
+  /** HOLD-BACK annoncé aux lecteurs : retard visé sur le direct au démarrage. */
+  holdBackS: number;
   segmenter: SegmenterOptions;
   upstream: UpstreamOptions;
   failover: FailoverOptions;
   /** Sans nouveau segment depuis ce délai, la connexion amont est jugée bloquée. */
   stallTimeoutMs: number;
+  detection: DetectionOptions;
 }
 
 export interface RelayDeps {
   cache: SegmentCache;
   metrics: RelayMetrics;
   log: FastifyBaseLogger;
+  /** Événements de santé de chaque source (score, classement des sources). */
+  health?: (source: RelaySource, event: HealthEvent) => void;
+  /** Analyse d'image et de son ; absente, la détection d'écran noir est désactivée. */
+  content?: ContentAnalyzer;
 }
 
 export type RelayState = 'starting' | 'live' | 'recovering' | 'closed';
@@ -44,7 +66,16 @@ export class RelayUnavailableError extends Error {
 /** Fréquence de vérification du blocage amont : bien plus fine que le délai lui-même. */
 const STALL_CHECK_INTERVAL_MS = 250;
 
-type ConnectionEnd = 'ended' | 'failed' | 'stalled' | 'switch' | 'closed';
+/** Les octets doivent être récents pour parler de gel (sinon c'est un blocage réseau, géré à part). */
+const FREEZE_BYTES_RECENT_MS = 1000;
+/** Lissage du débit attendu (moyenne mobile exponentielle sur les segments publiés). */
+const BITRATE_SMOOTHING = 0.2;
+/** Part d'un segment noire ou muette pour le compter comme « mort ». */
+const DEAD_SEGMENT_RATIO = 0.9;
+
+type SwitchReason = 'switch' | 'frozen' | 'content' | 'slow';
+type ConnectionEnd = 'ended' | 'failed' | 'stalled' | 'closed' | SwitchReason;
+const SWITCH_REASONS = new Set<ConnectionEnd>(['switch', 'frozen', 'content', 'slow']);
 
 /**
  * Relais d'une chaîne : une connexion amont, partagée par tous ses spectateurs, recopiée
@@ -73,6 +104,16 @@ export class Relay {
   private outageStartedAt: number | null = null;
   private waiters: { resolve: () => void; reject: (err: Error) => void }[] = [];
   private failure: Error | null = null;
+  /** Débit du flux (octets/s de média), appris sur les segments publiés. */
+  private expectedBytesPerS: number | null = null;
+  /** Octets reçus récemment, pour mesurer le débit réel de la source. */
+  private arrivals: { at: number; bytes: number }[] = [];
+  private lastBytesAt = 0;
+  private connectionOpenedAt = 0;
+  /** Secondes consécutives d'image noire ou de silence de la source en cours. */
+  private deadS = 0;
+  /** Lecteurs en attente d'un segment précis (rechargement bloquant). */
+  private readonly segmentWaiters = new Set<{ seq: number; done: () => void }>();
   viewers = 0;
   idleSince: number | null = null;
 
@@ -112,9 +153,10 @@ export class Relay {
   }
 
   /** Indicateur de source et de santé pour le lecteur. */
-  get status(): { activeSource: number; sourceCount: number; bufferedS: number } {
+  get status(): { activeSource: number; activePortalId: string; sourceCount: number; bufferedS: number } {
     return {
       activeSource: Math.max(0, this.sources.indexOf(this.current)),
+      activePortalId: this.current.portalId,
       sourceCount: this.sources.length,
       bufferedS: this.window.bufferedS,
     };
@@ -157,20 +199,50 @@ export class Relay {
         discontinuitySequence: this.window.discontinuitySequence,
         segments: this.window.segments,
         targetDurationS: this.options.targetDurationS,
+        blockingReload: { holdBackS: this.options.holdBackS },
       },
       uri,
     );
+  }
+
+  /** Prochain numéro de segment (celui que publiera la source). */
+  get nextSeq(): number {
+    return (this.window.segments.at(-1)?.seq ?? this.window.mediaSequence - 1) + 1;
+  }
+
+  /**
+   * Rechargement bloquant : résolu dès que le segment `seq` est publié, ou à l'échéance
+   * (la playlist actuelle part alors telle quelle, le lecteur redemandera).
+   */
+  waitForSegment(seq: number, timeoutMs: number): Promise<void> {
+    if (seq < this.nextSeq || this.isClosed()) return Promise.resolve();
+    return new Promise((resolve) => {
+      const waiter = { seq, done: (): void => undefined };
+      const timer = setTimeout(() => {
+        waiter.done();
+      }, timeoutMs);
+      waiter.done = () => {
+        clearTimeout(timer);
+        this.segmentWaiters.delete(waiter);
+        resolve();
+      };
+      this.segmentWaiters.add(waiter);
+    });
   }
 
   segment(seq: number): Buffer | undefined {
     return this.window.get(seq)?.data ?? this.deps.cache.get(this.id, seq);
   }
 
-  /** Bascule immédiate vers la source suivante (détection de gel, tests). */
-  requestSwitch(): void {
+  /** Bascule immédiate vers la source suivante (gel, écran noir, débit, tests). */
+  requestSwitch(reason: SwitchReason = 'switch'): void {
     if (this.connection === null) return;
-    this.connectionEnd = 'switch';
+    this.connectionEnd ??= reason;
     this.connection.abort();
+  }
+
+  private emit(source: RelaySource, event: HealthEvent): void {
+    this.deps.health?.(source, event);
   }
 
   close(reason: string): void {
@@ -180,6 +252,7 @@ export class Relay {
     this.connection?.abort();
     this.deps.cache.forget(this.id);
     this.rejectWaiters(new RelayUnavailableError('relais fermé'));
+    for (const w of [...this.segmentWaiters]) w.done();
     this.log.info({ reason, segments: this.published }, 'relais fermé');
   }
 
@@ -193,16 +266,28 @@ export class Relay {
       const end = await this.connect(this.current);
       if (this.isClosed()) break;
       const produced = end.produced;
+      const source = this.current;
       // Le morceau en cours est publié s'il est utile ; la suite portera une discontinuité.
       this.segmenter.breakStream();
+      this.deadS = 0;
+      this.arrivals = [];
       if (end.kind !== 'switch' && end.kind !== 'ended')
         this.deps.metrics.upstreamFailures.inc({ kind: end.kind });
+      const at = Date.now();
+      if (end.kind === 'frozen') this.emit(source, { kind: 'freeze', at });
+      else if (end.kind === 'content') this.emit(source, { kind: 'content', at });
+      else if (end.kind === 'slow') this.emit(source, { kind: 'segment', at, ok: false });
+      if (end.kind !== 'switch' && end.kind !== 'closed') this.emit(source, { kind: 'down', at });
       // Début de panne (pour la mesure de reprise) : après le segment final éventuel ci-dessus.
       if (this.published > 0) this.outageStartedAt ??= Date.now();
 
       const bufferedAhead =
         this.published > 0 && Date.now() - this.lastSegmentAt < this.options.bufferS * 1000;
-      const decision = this.policy.next({ produced, bufferedAhead, switchRequested: end.kind === 'switch' });
+      const decision = this.policy.next({
+        produced,
+        bufferedAhead,
+        switchRequested: SWITCH_REASONS.has(end.kind),
+      });
       if (this.published === 0 && this.policy.exhausted) {
         this.failure = new RelayUnavailableError('aucune source ne répond');
         this.rejectWaiters(this.failure);
@@ -230,11 +315,39 @@ export class Relay {
     this.connection = controller;
     this.connectionEnd = null;
     const before = this.published;
-    let progressAt = Date.now();
+    const openedAt = Date.now();
+    this.connectionOpenedAt = openedAt;
+    let progressAt = openedAt;
+    // Gel : les horodatages n'avancent plus alors que les octets arrivent toujours.
+    const advancesAtStart = this.segmenter.stats.timestampAdvances;
+    let advances = advancesAtStart;
+    let advancedAt = openedAt;
+    const detection = this.options.detection;
     const watchdog = setInterval(() => {
+      const now = Date.now();
       if (this.published > before) progressAt = Math.max(progressAt, this.lastSegmentAt);
-      if (Date.now() - progressAt > this.options.stallTimeoutMs) {
+      if (now - progressAt > this.options.stallTimeoutMs) {
         this.connectionEnd ??= 'stalled';
+        controller.abort();
+        return;
+      }
+      const seen = this.segmenter.stats.timestampAdvances;
+      if (seen !== advances) {
+        advances = seen;
+        advancedAt = now;
+      } else if (
+        seen > advancesAtStart &&
+        now - advancedAt > detection.freezeMs &&
+        now - this.lastBytesAt < FREEZE_BYTES_RECENT_MS
+      ) {
+        this.log.warn({ source: source.id, ms: now - advancedAt }, 'flux gelé : horodatages figés');
+        this.connectionEnd ??= 'frozen';
+        controller.abort();
+        return;
+      }
+      if (this.isTooSlow(now, openedAt)) {
+        this.log.warn({ source: source.id }, 'source trop lente pour tenir le direct');
+        this.connectionEnd ??= 'slow';
         controller.abort();
       }
     }, STALL_CHECK_INTERVAL_MS);
@@ -242,19 +355,31 @@ export class Relay {
     let kind: ConnectionEnd = 'ended';
     try {
       let link: UpstreamLink;
+      const resolveStart = Date.now();
       try {
         link = await source.resolve();
+        this.emit(source, { kind: 'resolve', at: Date.now(), ms: Date.now() - resolveStart, ok: true });
       } catch {
         this.deps.metrics.resolveFailures.inc();
+        this.emit(source, { kind: 'resolve', at: Date.now(), ms: Date.now() - resolveStart, ok: false });
         throw new UpstreamError('network', 'create_link en échec');
       }
       if (controller.signal.aborted) throw new UpstreamError('network', 'abandon');
       this.deps.metrics.activeUpstreams++;
+      const fetchStart = Date.now();
+      let firstByte = true;
       try {
         await readUpstream(
           link,
           {
             data: (bytes) => {
+              const now = Date.now();
+              if (firstByte) {
+                firstByte = false;
+                this.emit(source, { kind: 'firstByte', at: now, ms: now - fetchStart });
+              }
+              this.lastBytesAt = now;
+              this.arrivals.push({ at: now, bytes: bytes.length });
               this.deps.metrics.bytesIn.inc({}, bytes.length);
               this.segmenter.push(bytes);
             },
@@ -290,11 +415,60 @@ export class Relay {
     return this.connectionEnd;
   }
 
+  /**
+   * Source trop lente : sur la dernière fenêtre, elle livre bien moins d'octets que le flux
+   * n'en consomme. Seulement s'il existe une autre source (sinon, mieux vaut un flux lent
+   * que pas de flux) et une fois le débit du flux connu.
+   */
+  private isTooSlow(now: number, openedAt: number): boolean {
+    const d = this.options.detection;
+    const expected = this.expectedBytesPerS;
+    if (expected === null || this.sources.length < 2 || now - openedAt < d.slowWindowMs) return false;
+    const since = now - d.slowWindowMs;
+    this.arrivals = this.arrivals.filter((a) => a.at >= since);
+    const received = this.arrivals.reduce((n, a) => n + a.bytes, 0);
+    return received < d.slowRatio * expected * (d.slowWindowMs / 1000);
+  }
+
+  /** Image noire ou silence : cumulés sur les segments successifs de la même source. */
+  private judgeContent(sourceId: string, data: Buffer, durationS: number): void {
+    const analyzer = this.deps.content;
+    if (analyzer === undefined) return;
+    void analyzer.analyze(data, durationS).then((v) => {
+      // Segment non jugé (analyse saturée) ou source déjà quittée : on ne conclut rien.
+      if (v === null || sourceId !== this.current.id || this.isClosed()) return;
+      const dead =
+        (v.hasVideo && v.blackS >= DEAD_SEGMENT_RATIO * durationS) ||
+        (v.hasAudio && v.silentS >= DEAD_SEGMENT_RATIO * durationS);
+      this.deadS = dead ? this.deadS + durationS : 0;
+      if (this.deadS < this.options.detection.contentFailureS) return;
+      this.log.warn({ source: sourceId, seconds: this.deadS }, 'image noire ou silence prolongé');
+      this.deadS = 0;
+      if (this.sources.length > 1) this.requestSwitch('content');
+      else this.emit(this.current, { kind: 'content', at: Date.now() });
+    });
+  }
+
   private onSegment(draft: SegmentDraft): void {
     const now = Date.now();
     const segment = this.window.append({ ...draft, sourceId: this.current.id }, now);
+    if (this.lastSegmentAt < this.connectionOpenedAt) this.emit(this.current, { kind: 'up', at: now });
     this.lastSegmentAt = now;
     this.published++;
+    if (draft.durationS > 0) {
+      const bytesPerS = draft.data.length / draft.durationS;
+      this.expectedBytesPerS =
+        this.expectedBytesPerS === null
+          ? bytesPerS
+          : this.expectedBytesPerS + BITRATE_SMOOTHING * (bytesPerS - this.expectedBytesPerS);
+      this.emit(this.current, {
+        kind: 'segment',
+        at: now,
+        ok: true,
+        bitrateKbps: Math.round((bytesPerS * 8) / 1000),
+      });
+      this.judgeContent(this.current.id, draft.data, draft.durationS);
+    }
     const m = this.deps.metrics;
     m.segments.inc();
     const forced = this.segmenter.stats.forcedCuts - this.forcedCutsSeen;
@@ -315,6 +489,7 @@ export class Relay {
     const waiters = this.waiters;
     this.waiters = [];
     for (const w of waiters) w.resolve();
+    for (const w of [...this.segmentWaiters]) if (w.seq <= segment.seq) w.done();
   }
 
   private rejectWaiters(err: Error): void {

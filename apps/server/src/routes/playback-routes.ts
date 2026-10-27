@@ -1,4 +1,9 @@
-import { PlaybackRequest, type PlaybackStatusDto } from '@lumen/protocol';
+import {
+  type ChannelHealthDto,
+  PlaybackRequest,
+  PlaybackStatsRequest,
+  type PlaybackStatusDto,
+} from '@lumen/protocol';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { requireUser } from '../http/auth.js';
@@ -14,6 +19,9 @@ const TS_CONTENT_TYPE = 'video/mp2t';
 const SEGMENT_CACHE_CONTROL = 'private, max-age=120, immutable';
 
 const SessionParams = z.object({ sessionId: z.string().min(1) });
+const ChannelParams = z.object({ portalId: z.string().min(1), channelId: z.string().min(1) });
+/** Rechargement bloquant (RFC 8216bis) : `_HLS_part` est ignoré, le relais ne publie pas de parties. */
+const BlockingQuery = z.object({ _HLS_msn: z.coerce.number().int().nonnegative().optional() });
 const SegmentParams = SessionParams.extend({ file: z.string().regex(/^\d{1,15}\.ts$/) });
 
 export function registerPlaybackRoutes(app: FastifyInstance, playback: PlaybackService): void {
@@ -22,14 +30,20 @@ export function registerPlaybackRoutes(app: FastifyInstance, playback: PlaybackS
     return reply.code(201).send(await playback.start(user, parseOr400(PlaybackRequest, req.body)));
   });
 
-  app.get('/api/playback/:sessionId/index.m3u8', (req, reply) => {
+  app.get('/api/playback/:sessionId/index.m3u8', async (req, reply) => {
     const user = requireUser(req);
     const { sessionId } = parseOr400(SessionParams, req.params);
+    const { _HLS_msn: msn } = parseOr400(BlockingQuery, req.query);
+    const text = await playback.playlist(user, sessionId, msn);
     // Playlist en direct : jamais en cache, elle change à chaque segment.
-    return reply
-      .header('Content-Type', HLS_CONTENT_TYPE)
-      .header('Cache-Control', 'no-store')
-      .send(playback.playlist(user, sessionId));
+    return reply.header('Content-Type', HLS_CONTENT_TYPE).header('Cache-Control', 'no-store').send(text);
+  });
+
+  app.post('/api/playback/:sessionId/stats', async (req, reply) => {
+    const user = requireUser(req);
+    const { sessionId } = parseOr400(SessionParams, req.params);
+    playback.recordStats(user, sessionId, parseOr400(PlaybackStatsRequest, req.body));
+    return reply.code(204).send();
   });
 
   app.get('/api/playback/:sessionId/seg/:file', (req, reply) => {
@@ -45,6 +59,11 @@ export function registerPlaybackRoutes(app: FastifyInstance, playback: PlaybackS
   app.get('/api/playback/:sessionId/status', (req): PlaybackStatusDto => {
     const user = requireUser(req);
     return playback.status(user, parseOr400(SessionParams, req.params).sessionId);
+  });
+
+  app.get('/api/portals/:portalId/channels/:channelId/health', async (req): Promise<ChannelHealthDto> => {
+    requireUser(req);
+    return playback.channelHealth(parseOr400(ChannelParams, req.params));
   });
 
   app.delete('/api/playback/:sessionId', async (req, reply) => {

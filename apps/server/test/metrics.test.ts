@@ -38,6 +38,10 @@ describe('/metrics (Prometheus)', () => {
       'lumen_relay_source_switches_total',
       'lumen_link_resolution_failures_total',
       'lumen_relay_bytes_out_total',
+      'lumen_playback_stall_seconds_total',
+      'lumen_playback_watch_seconds_total',
+      'process_cpu_seconds_total',
+      'process_resident_memory_bytes',
     ]) {
       expect(text).toContain(name);
     }

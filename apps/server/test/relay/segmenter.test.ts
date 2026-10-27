@@ -24,6 +24,7 @@ const OPTIONS: SegmenterOptions = {
   forceCutDurationS: 5.5,
   timestampJumpS: 5,
   minFlushDurationS: 0.5,
+  fastStartS: 0,
 };
 
 function segment(
@@ -182,6 +183,30 @@ describe('découpeur MPEG-TS', () => {
     const { out } = segment(buildStream({ durationS: 10 }));
     expect(out.map((d) => ccOf(d.data, 0))).toEqual([0, 1, 2, 3]);
     expect(out.map((d) => ccOf(d.data, 1))).toEqual([0, 1, 2, 3]);
+  });
+
+  describe('démarrage rapide (nouvelle source : données au lecteur sans attendre l image clé suivante)', () => {
+    const FAST = { fastStartS: 2, firstTargetDurationS: 0.5 };
+
+    it('segments courts pendant la phase de démarrage, puis coupe sur les images clés', () => {
+      const { out } = segment(buildStream({ durationS: 6 }), FAST);
+      // Coupe à la première image au-delà de 0,5 s (images de 40 ms), puis à l'image clé de 4 s.
+      expect(durations(out)).toEqual([0.52, 0.52, 0.52, 2.44]);
+      expect(out.map((d) => d.independent)).toEqual([true, false, false, false]);
+      expect(startsWithIdr(out[0]!.data)).toBe(true);
+    });
+
+    it('chaque nouvelle source (bascule, reconnexion) repart en démarrage rapide', () => {
+      const { out, seg } = segment(buildStream({ durationS: 6 }), FAST);
+      seg.breakStream();
+      const before = out.length;
+      const other = new TsBuilder({ video: true, audio: true }, { pmt: 0x20, video: 0x21, audio: 0x22 });
+      seg.push(buildStream({ durationS: 3, startPts: 5_000_000, builder: other }));
+      const fresh = out.slice(before);
+      expect(durations(fresh)).toEqual([0.52, 0.52, 0.52]);
+      expect(fresh[0]!.discontinuity).toBe(true);
+      expect(startsWithIdr(fresh[0]!.data, 0x21)).toBe(true);
+    });
   });
 
   it('rien n est émis tant que PAT et PMT sont inconnues', () => {

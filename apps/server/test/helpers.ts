@@ -107,6 +107,9 @@ export async function startServer(overrides: Partial<ServerConfigInput> = {}): P
     adminPassword: ADMIN.password,
     cookieSecure: false,
     logLevel: 'debug',
+    // Les sondes de fond ouvrent des flux : désactivées sauf dans les tests qui les visent,
+    // pour que les comptes de connexions amont ne dépendent que du test.
+    probes: false,
     ...overrides,
   };
   const server = await createServer(resolveConfig(config), { logStream });

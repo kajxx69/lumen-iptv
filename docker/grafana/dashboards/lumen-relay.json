@@ -6,7 +6,10 @@
   "version": 1,
   "editable": true,
   "refresh": "10s",
-  "time": { "from": "now-6h", "to": "now" },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "tags": ["lumen"],
   "panels": [
     {
@@ -14,33 +17,73 @@
       "type": "stat",
       "title": "Connexions amont",
       "description": "Une par chaîne relayée, quel que soit le nombre de spectateurs.",
-      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "lumen-prometheus" },
-      "targets": [{ "refId": "A", "expr": "lumen_relay_upstream_connections" }]
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "lumen_relay_upstream_connections"
+        }
+      ]
     },
     {
       "id": 2,
       "type": "stat",
       "title": "Spectateurs",
-      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "lumen-prometheus" },
-      "targets": [{ "refId": "A", "expr": "lumen_relay_viewers" }]
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "lumen_relay_viewers"
+        }
+      ]
     },
     {
       "id": 3,
       "type": "stat",
       "title": "Démarrage p95",
       "description": "Ouverture d’un relais jusqu’au premier segment. Cible : < 2 s.",
-      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "lumen-prometheus" },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "s",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 2 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
             ]
           }
         }
@@ -57,16 +100,30 @@
       "type": "stat",
       "title": "Reprise / bascule p95",
       "description": "Panne amont jusqu’au premier segment de la source qui reprend. Cible : < 2 s.",
-      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "lumen-prometheus" },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
       "fieldConfig": {
         "defaults": {
           "unit": "s",
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 2 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
             ]
           }
         }
@@ -82,25 +139,59 @@
       "id": 5,
       "type": "stat",
       "title": "Bascules (dernière heure)",
-      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "lumen-prometheus" },
-      "targets": [{ "refId": "A", "expr": "sum(increase(lumen_relay_source_switches_total[1h]))" }]
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(lumen_relay_source_switches_total[1h]))"
+        }
+      ]
     },
     {
       "id": 6,
       "type": "stat",
       "title": "Échecs de create_link (heure)",
-      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "lumen-prometheus" },
-      "targets": [{ "refId": "A", "expr": "sum(increase(lumen_link_resolution_failures_total[1h]))" }]
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(lumen_link_resolution_failures_total[1h]))"
+        }
+      ]
     },
     {
       "id": 7,
       "type": "timeseries",
       "title": "Pannes amont par type (par minute)",
       "description": "failed : réseau ou HTTP ; stalled : plus aucun segment, connexion rouverte.",
-      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "lumen-prometheus" },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
       "targets": [
         {
           "refId": "A",
@@ -118,9 +209,21 @@
       "id": 8,
       "type": "timeseries",
       "title": "Bande passante",
-      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "lumen-prometheus" },
-      "fieldConfig": { "defaults": { "unit": "bps" } },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps"
+        }
+      },
       "targets": [
         {
           "refId": "A",
@@ -138,9 +241,21 @@
       "id": 9,
       "type": "timeseries",
       "title": "Démarrage et reprise (p50 / p95)",
-      "gridPos": { "x": 0, "y": 12, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "lumen-prometheus" },
-      "fieldConfig": { "defaults": { "unit": "s" } },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        }
+      },
       "targets": [
         {
           "refId": "A",
@@ -163,12 +278,32 @@
       "id": 10,
       "type": "timeseries",
       "title": "Mémoire du relais",
-      "gridPos": { "x": 12, "y": 12, "w": 12, "h": 8 },
-      "datasource": { "type": "prometheus", "uid": "lumen-prometheus" },
-      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        }
+      },
       "targets": [
-        { "refId": "A", "expr": "lumen_relay_buffered_bytes", "legendFormat": "tampons glissants" },
-        { "refId": "B", "expr": "lumen_relay_cache_bytes", "legendFormat": "cache des segments évincés" }
+        {
+          "refId": "A",
+          "expr": "lumen_relay_buffered_bytes",
+          "legendFormat": "tampons glissants"
+        },
+        {
+          "refId": "B",
+          "expr": "lumen_relay_cache_bytes",
+          "legendFormat": "cache des segments évincés"
+        }
       ]
     },
     {
@@ -176,8 +311,16 @@
       "type": "timeseries",
       "title": "Qualité du découpage",
       "description": "Coupes sans image clé (GOP trop long) et segments amont sautés : idéalement à zéro.",
-      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 6 },
-      "datasource": { "type": "prometheus", "uid": "lumen-prometheus" },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
       "targets": [
         {
           "refId": "A",
@@ -193,6 +336,70 @@
           "refId": "C",
           "expr": "rate(lumen_relay_skipped_segments_total[5m]) * 60",
           "legendFormat": "segments sautés / min"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Ratio de rebuffering",
+      "description": "Temps passé à attendre des données / temps de visionnage, mesuré par les lecteurs. Cible PROJECT.md : < 0,5 %.",
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.005
+              }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(lumen_playback_stall_seconds_total[1h])) / clamp_min(sum(increase(lumen_playback_watch_seconds_total[1h])) + sum(increase(lumen_playback_stall_seconds_total[1h])), 1)"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "CPU du serveur (cœurs)",
+      "description": "Temps CPU consommé par seconde : 1 = un cœur entier. Inclut l’analyse d’image (écran noir) et inclura le transcodage (phase 8).",
+      "gridPos": {
+        "x": 6,
+        "y": 26,
+        "w": 18,
+        "h": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lumen-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(process_cpu_seconds_total[1m])",
+          "legendFormat": "serveur"
         }
       ]
     }

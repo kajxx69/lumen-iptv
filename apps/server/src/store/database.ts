@@ -60,6 +60,16 @@ const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX recents_by_user ON recents (user_id, watched_at);
   `,
+  // Santé des sources (chaîne, portail) : survit au redémarrage pour guider le choix de source.
+  `
+  CREATE TABLE source_health (
+    portal_id TEXT NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL,
+    data TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (portal_id, channel_id)
+  );
+  `,
 ];
 
 export function openDatabase(path: string): Db {

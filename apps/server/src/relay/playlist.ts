@@ -5,6 +5,12 @@ export interface PlaylistInput {
   discontinuitySequence: number;
   segments: readonly RelaySegment[];
   targetDurationS: number;
+  /**
+   * Rechargement bloquant (RFC 8216bis §6.2.5.2) : le lecteur demande « le segment N » et la
+   * réponse part dès qu'il existe, au lieu d'interroger toutes les 3 s. HOLD-BACK : retard
+   * visé sur le direct au démarrage (au moins trois durées cibles).
+   */
+  blockingReload?: { holdBackS: number };
 }
 
 /**
@@ -21,6 +27,11 @@ export function renderPlaylist(input: PlaylistInput, uri: (seq: number) => strin
     `#EXT-X-MEDIA-SEQUENCE:${input.mediaSequence}`,
     `#EXT-X-DISCONTINUITY-SEQUENCE:${input.discontinuitySequence}`,
   ];
+  if (input.blockingReload !== undefined) {
+    lines.push(
+      `#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,HOLD-BACK=${input.blockingReload.holdBackS.toFixed(3)}`,
+    );
+  }
   for (const s of input.segments) {
     if (s.discontinuity) lines.push('#EXT-X-DISCONTINUITY');
     lines.push(`#EXT-X-PROGRAM-DATE-TIME:${new Date(s.programDateTimeMs).toISOString()}`);

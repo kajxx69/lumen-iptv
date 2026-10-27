@@ -1,6 +1,10 @@
 # Backend Lumen. Les paquets du monorepo sont exécutés depuis leurs sources TypeScript
 # (tsx) : la compilation en un seul fichier viendra avec l'image de production.
 FROM node:22-bookworm-slim
+# FFmpeg : détection d'écran noir et de silence (moteur de résilience), puis transcodage.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ffmpeg \
+  && rm -rf /var/lib/apt/lists/*
 RUN corepack enable
 WORKDIR /repo
 COPY . .

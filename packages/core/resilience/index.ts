@@ -1,2 +1,11 @@
-// Score de santé et politique de bascule : phase 5.
-export {};
+// Moteur de résilience : score de santé des sources (phase 5).
+export {
+  DEFAULT_HEALTH_OPTIONS,
+  type HealthEvent,
+  type HealthOptions,
+  HealthTracker,
+  type SerializedHealth,
+  type SourceHealth,
+  rankSources,
+  scoreHealth,
+} from './health.js';

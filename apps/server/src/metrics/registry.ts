@@ -44,18 +44,22 @@ export class Counter implements Metric {
   }
 }
 
-/** Jauge lue au moment de la collecte : toujours exacte, rien à tenir à jour. */
+/**
+ * Valeur lue au moment de la collecte : toujours exacte, rien à tenir à jour. Jauge, ou
+ * compteur tenu ailleurs (temps CPU du processus).
+ */
 export class Gauge implements Metric {
   constructor(
     readonly name: string,
     private readonly help: string,
     private readonly read: () => number,
+    private readonly type: 'gauge' | 'counter' = 'gauge',
   ) {}
 
   render(): string[] {
     return [
       `# HELP ${this.name} ${this.help}`,
-      `# TYPE ${this.name} gauge`,
+      `# TYPE ${this.name} ${this.type}`,
       formatSample(this.name, '', this.read()),
     ];
   }
@@ -105,6 +109,11 @@ export class MetricsRegistry {
 
   gauge(name: string, help: string, read: () => number): Gauge {
     return this.add(new Gauge(name, help, read));
+  }
+
+  /** Compteur dont la valeur vient d'ailleurs (lu à la collecte). */
+  counterFrom(name: string, help: string, read: () => number): Gauge {
+    return this.add(new Gauge(name, help, read, 'counter'));
   }
 
   histogram(name: string, help: string, buckets: readonly number[]): Histogram {

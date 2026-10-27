@@ -1,6 +1,6 @@
-import type { PlaybackDto, PlaybackStatusDto, RecentDto } from '@lumen/protocol';
+import type { ChannelHealthDto, PlaybackDto, PlaybackStatusDto, RecentDto } from '@lumen/protocol';
 import { afterEach, describe, expect, it } from 'vitest';
-import { type Stack, delay, readPlaylist, sendChaos, startStack } from './helpers.js';
+import { type Stack, activeStreams, delay, readPlaylist, sendChaos, startStack, waitFor } from './helpers.js';
 
 describe('sessions de lecture', () => {
   let stack: Stack | undefined;
@@ -126,5 +126,35 @@ describe('sessions de lecture', () => {
     const base = playback.streamUrl.replace(/index\.m3u8$/, '');
     expect((await stack.srv.admin.get(`${base}seg/999999.ts`)).status).toBe(404);
     expect((await stack.srv.admin.get(`${base}seg/abc.ts`)).status).toBe(400);
+  });
+});
+
+describe('sondes de fond', () => {
+  it('un favori est sondé sans être regardé : sa santé est connue avant le premier clic', async () => {
+    const stack = await startStack({ channelCount: 50 }, { probes: true, probeFavoritesIntervalMs: 60_000 });
+    try {
+      const fav = await stack.srv.admin.request('PUT', `/api/favorites/${stack.portalDto.id}/7`);
+      expect(fav.status).toBe(204);
+      const health = await waitFor(
+        'sonde du favori',
+        async () => {
+          const res = await stack.srv.admin.get<ChannelHealthDto>(
+            `/api/portals/${stack.portalDto.id}/channels/7/health`,
+          );
+          const own = res.body.sources[0];
+          // Sonde complète : lien, premier octet, flux reçu.
+          return own !== undefined && own.samples >= 3 ? own : undefined;
+        },
+        20_000,
+        500,
+      );
+      expect(health.resolveLatencyMs).toBeGreaterThan(0);
+      expect(health.timeToFirstByteMs).toBeGreaterThan(0);
+      // La sonde a refermé sa connexion : elle n'occupe pas la MAC du portail.
+      await delay(500);
+      expect(await activeStreams(stack.portal, '7')).toBe(0);
+    } finally {
+      await stack.close();
+    }
   });
 });

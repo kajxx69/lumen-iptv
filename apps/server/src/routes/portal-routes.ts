@@ -5,8 +5,10 @@ import {
   type EpgBatchDto,
   type EpgEntryDto,
   type PortalDto,
+  type PortalHealthDto,
   type VodPageDto,
 } from '@lumen/protocol';
+import type { PortalHealth } from '../portals/portal-health.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { CatalogService } from '../catalog/catalog-service.js';
@@ -55,12 +57,18 @@ interface PortalRouteDeps {
   registry: PortalRegistry;
   catalog: CatalogService;
   config: ServerConfig;
+  health: PortalHealth;
 }
 
 export function registerPortalRoutes(
   app: FastifyInstance,
-  { store, registry, catalog, config }: PortalRouteDeps,
+  { store, registry, catalog, config, health }: PortalRouteDeps,
 ): void {
+  app.get('/api/portals/:portalId/health', async (req): Promise<PortalHealthDto> => {
+    requireUser(req);
+    return health.check(parseOr400(PortalParams, req.params).portalId);
+  });
+
   app.get('/api/portals', (req): PortalDto[] => {
     requireUser(req);
     return store.list().map(toDto);

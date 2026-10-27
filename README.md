@@ -2,9 +2,10 @@
 
 Lecteur IPTV (Stalker Portal) centré sur la résilience. Voir [PROJECT.md](PROJECT.md) pour la spécification.
 
-**État : phase 4** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
+**État : phase 5** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
 comptes et chiffrement des portails (2), relais avec tampon glissant et bascule de source (3),
-client web : catalogue virtualisé, lecteur, guide des programmes, favoris (4).
+client web : catalogue virtualisé, lecteur, guide des programmes, favoris (4), moteur de
+résilience : détection de panne à trois niveaux, score de santé, sondes, tampon adaptatif (5).
 
 ## Prérequis
 
@@ -151,8 +152,64 @@ docker compose --profile observability up --build   # Grafana sur http://localho
 
 Le tableau de bord « Lumen — relais et résilience » (provisionné depuis `docker/grafana/`)
 affiche connexions amont, spectateurs, démarrage et reprise au 95e centile, bascules, pannes par
-type, échecs de `create_link`, bande passante entrante et sortante, mémoire des tampons. Aucune
-métrique ne porte d'identifiant de portail, de chaîne ni d'utilisateur.
+type, échecs de `create_link`, bande passante entrante et sortante, mémoire des tampons, ratio
+de rebuffering mesuré par les lecteurs (cible < 0,5 %) et CPU du serveur. Aucune métrique ne
+porte d'identifiant de portail, de chaîne ni d'utilisateur.
+
+## Le moteur de résilience
+
+Un lecteur ne peut pas inventer des images qui n'arrivent pas. Lumen masque les pannes en les
+absorbant (tampon), en reprenant plus vite que le tampon ne se vide, et en basculant vers une
+autre source — en choisissant celle-ci d'après ce qu'il sait déjà d'elle.
+
+**Sources de secours trouvées seules.** Au lancement d'une chaîne, le serveur cherche la même
+chaîne sur les autres portails enregistrés, par identifiant EPG (le signal le plus fiable entre
+deux portails). Le client n'a rien à fournir. La fusion complète des catalogues arrive en phase 6.
+
+**Détection de panne à trois niveaux** (dans le relais, pour toutes les sources) :
+
+| Niveau      | Signal                                                         | Seuil          | Réaction                           |
+| ----------- | -------------------------------------------------------------- | -------------- | ---------------------------------- |
+| Réseau      | socket fermée, délai, HTTP 4xx/5xx, plus aucun segment         | immédiat / 8 s | nouveau lien, puis source suivante |
+| Progression | octets reçus mais horodatages vidéo figés                      | 2 s            | source suivante                    |
+| Contenu     | image noire ou silence (FFmpeg `blackdetect`, `silencedetect`) | 10 s           | source suivante, source déclassée  |
+| Débit       | la source livre moins de 40 % du débit du flux sur 4 s         | 4 s            | source suivante (s'il y en a une)  |
+
+**Score de santé** (`packages/core/resilience`, 0 à 100) par couple (chaîne, portail) : latence
+de `create_link`, premier octet, échecs de segments sur 5 min, gigue de débit, gels et pannes de
+contenu sur l'heure, disponibilité sur 24 h. Les sources sont classées par score, jamais par
+l'ordre de la liste ; les scores sont gardés dans SQLite et survivent au redémarrage.
+`GET /api/portals/:id/channels/:cid/health` les expose.
+
+**Sondes de fond.** Les favoris de tous les comptes sont sondés toutes les 15 min (lien, premier
+octet, fermeture immédiate) ; le catalogue complet la nuit (3 h–6 h, 600 chaînes par heure, en
+reprenant où le balayage s'est arrêté). Jamais sur un portail où quelqu'un regarde déjà une
+chaîne : beaucoup n'acceptent qu'une connexion par MAC.
+
+**Rechargement bloquant.** La playlist annonce `CAN-BLOCK-RELOAD` : le lecteur demande « le
+segment suivant » et le reçoit à l'instant de sa publication, au lieu d'interroger toutes les
+3 s. Pendant une bascule, c'est la différence entre une image qui continue et une image figée.
+
+**Démarrage rapide de chaque source.** Pendant les 2 premières secondes d'une nouvelle source
+(zapping, bascule, reconnexion), le relais publie des segments de 0,5 s sans attendre l'image
+clé suivante : le lecteur, qui a peu d'avance à ce moment-là, reçoit la suite au fil de l'eau
+au lieu d'attendre un GOP entier. Premier segment prêt en ≈ 0,9 s ; une panne une seconde après
+le zapping passe sans image figée.
+
+**Tampon client adaptatif.** Sur un relais déjà chaud, le lecteur part directement à 20 s du
+direct (de quoi couvrir une coupure de 15 s) ; sur un relais froid, il démarre au premier
+segment et construit ce retard en lisant à 97 %. La cible monte jusqu'à 60 s quand le réseau se
+montre instable (coupure de lecture, segments lents), et redescend doucement ensuite.
+
+**Image jamais bloquée sur une jonction.** Au passage d'une source à l'autre, Chrome peut
+s'arrêter sur un trou de quelques millisecondes entre pistes. Le lecteur le détecte en 200 ms
+et le franchit (saut du trou ou pas de 0,1 s), là où hls.js attendrait 1 à 2 s.
+
+Variables : `LUMEN_RELAY_FAST_START_S`, `LUMEN_RELAY_FIRST_SEGMENT_TARGET_S`,
+`LUMEN_FREEZE_DETECTION_MS`, `LUMEN_CONTENT_FAILURE_S`, `LUMEN_CONTENT_DETECTION`,
+`LUMEN_FFMPEG_PATH`, `LUMEN_PROBES`, `LUMEN_PROBE_FAVORITES_INTERVAL_MS`,
+`LUMEN_PROBE_CATALOG_START_HOUR` / `_END_HOUR` / `_PER_HOUR` (voir `apps/server/src/config.ts`).
+L'analyse d'image exige FFmpeg sur le serveur ; sans lui, elle se désactive avec un avertissement.
 
 ## Arborescence
 

@@ -1,6 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 import type { MetricsRegistry } from '../metrics/registry.js';
-import { Relay, type RelayOptions, type RelaySource } from './relay.js';
+import { Relay, type RelayDeps, type RelayOptions, type RelaySource } from './relay.js';
 import { RelayMetrics } from './relay-metrics.js';
 import { SegmentCache } from './segment-cache.js';
 
@@ -12,6 +12,10 @@ export interface RelayManagerOptions {
    */
   lingerMs: number;
   segmentCacheBytes: number;
+  /** Événements de santé des sources, pour le score (moteur de résilience). */
+  health?: RelayDeps['health'];
+  /** Analyse d'image et de son (écran noir, silence). */
+  content?: RelayDeps['content'];
 }
 
 /**
@@ -49,6 +53,8 @@ export class RelayManager {
         cache: this.cache,
         metrics: this.metrics,
         log: this.log,
+        ...(this.options.health === undefined ? {} : { health: this.options.health }),
+        ...(this.options.content === undefined ? {} : { content: this.options.content }),
       });
       this.relays.set(key, relay);
       relay.start();
@@ -84,6 +90,12 @@ export class RelayManager {
 
   get size(): number {
     return this.relays.size;
+  }
+
+  /** Un relais (même sans spectateur, pendant son délai de grâce) tient une connexion sur ce portail. */
+  portalBusy(portalId: string): boolean {
+    for (const relay of this.relays.values()) if (relay.status.activePortalId === portalId) return true;
+    return false;
   }
 
   closeAll(): void {

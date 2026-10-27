@@ -101,6 +101,21 @@ describe('playlist générée', () => {
     );
   });
 
+  it('rechargement bloquant annoncé : le lecteur voit chaque nouveau segment à l instant où il paraît', () => {
+    const text = renderPlaylist(
+      {
+        mediaSequence: 0,
+        discontinuitySequence: 0,
+        segments: segments(),
+        targetDurationS: 6,
+        blockingReload: { holdBackS: 20 },
+      },
+      (seq) => `seg/${seq}.ts`,
+    );
+    expect(text).toContain('#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,HOLD-BACK=20.000\n');
+    expect(text.indexOf('SERVER-CONTROL')).toBeLessThan(text.indexOf('#EXTINF'));
+  });
+
   it('TARGETDURATION ne descend jamais sous un segment (règle RFC 8216)', () => {
     const text = renderPlaylist(
       { mediaSequence: 0, discontinuitySequence: 0, segments: segments(), targetDurationS: 1 },

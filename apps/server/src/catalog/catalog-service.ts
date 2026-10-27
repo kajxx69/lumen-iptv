@@ -140,6 +140,20 @@ export class CatalogService {
     return this.store.channel(portalId, channelId);
   }
 
+  /**
+   * Sources de secours trouvées sans l'aide du client : la même chaîne (même identifiant
+   * EPG) sur les autres portails dont le catalogue est connu. Aucun portail n'est
+   * interrogé ici : la recherche reste instantanée au lancement d'une chaîne.
+   */
+  async alternatives(
+    portalId: string,
+    channelId: string,
+  ): Promise<{ portalId: string; channelId: string }[]> {
+    const channel = await this.channel(portalId, channelId);
+    if (channel?.epgId == null || channel.epgId === '') return [];
+    return this.store.findByEpgId(channel.epgId, portalId);
+  }
+
   forget(portalId: string): void {
     this.memo.delete(portalId);
   }
