@@ -15,6 +15,8 @@ export interface RelaySegment {
   sourceId: string;
   /** Ses parties, gardées tant qu'elles sont proches du direct ; vide ensuite. */
   parts: RelayPart[];
+  /** Horodatage de sa première image dans le flux (90 kHz). */
+  startTs: number;
 }
 
 const MS_PER_S = 1000;
@@ -75,6 +77,7 @@ export class SegmentWindow {
       programDateTimeMs: Math.round(programDateTimeMs),
       sourceId: draft.sourceId,
       parts: draft.parts,
+      startTs: draft.startTs,
     };
     this.pending = [];
     this.list.push(segment);

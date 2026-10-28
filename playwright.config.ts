@@ -25,6 +25,9 @@ const METRICS_TOKEN = process.env['E2E_METRICS_TOKEN'];
 
 export default defineConfig({
   fullyParallel: false,
+  // Un fichier à la fois : les scénarios mesurent des bascules et des arrêts d'image, qui n'ont de
+  // sens que sur une machine calme (les conversions d'une suite fausseraient les mesures de l'autre).
+  workers: 1,
   reporter: [['list']],
   projects: [
     {
@@ -96,6 +99,8 @@ export default defineConfig({
         LUMEN_MAX_STREAMS_PER_USER: '60',
         LUMEN_MAX_STREAMS_TOTAL: '80',
         LUMEN_API_REQUESTS_PER_MINUTE: '20000',
+        // Qualités réduites, conversions de format : plusieurs suites en ouvrent à la fois.
+        LUMEN_TRANSCODE_MAX_VIDEO: '4',
         // Confirmation nocturne par la grille EPG : hors des tests, qui peuvent tourner la nuit.
         LUMEN_GRID_CHECKS: 'false',
       },

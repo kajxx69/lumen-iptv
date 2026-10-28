@@ -62,6 +62,11 @@ export interface SegmentDraft {
   discontinuity: boolean;
   /** Ses parties (LL-HLS), déjà publiées une à une ; vide sans parties. */
   parts: PartDraft[];
+  /**
+   * Horodatage de sa première image (90 kHz). Deux sorties d'un même relais (directe et
+   * transcodée, horodatages conservés) se recalent l'une sur l'autre grâce à lui.
+   */
+  startTs: number;
 }
 
 export interface SegmenterStats {
@@ -394,12 +399,14 @@ export class TsSegmenter {
     this.pmtCc = (this.pmtCc + 1) & 0x0f;
     const parts = this.parts;
     this.parts = [];
+    const startTs = this.startTs ?? 0;
     this.emit({
       data: withTables(pat, pmt, packets),
       durationS: ticks / MPEG_CLOCK_HZ,
       independent: this.startIndependent,
       discontinuity: this.nextDiscontinuity,
       parts,
+      startTs,
     });
     this.nextDiscontinuity = false;
     this.segmentsSinceBreak++;

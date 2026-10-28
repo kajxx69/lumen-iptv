@@ -13,6 +13,7 @@ const draft = (durationS: number, discontinuity = false, bytes = 10) => ({
   independent: true,
   sourceId: 'a',
   parts: [] as PartDraft[],
+  startTs: 0,
 });
 
 describe('fenêtre glissante de segments', () => {

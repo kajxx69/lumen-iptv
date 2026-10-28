@@ -5,7 +5,7 @@ import type { ContentAnalyzer } from '../resilience/content-analyzer.js';
 import { type FailoverOptions, FailoverPolicy } from './failover.js';
 import type { TranscodedOutput } from '../transcode/transcoded-output.js';
 import { MediaOutput, type MediaOutputOptions } from './media-output.js';
-import type { ProgramStreams } from './mpegts.js';
+import { MPEG_CLOCK_HZ, type ProgramStreams, timestampDelta } from './mpegts.js';
 import type { SegmentUri } from './playlist.js';
 import type { RelayMetrics } from './relay-metrics.js';
 import type { SegmentCache } from './segment-cache.js';
@@ -117,8 +117,13 @@ export class Relay {
   private arrivals: { at: number; bytes: number }[] = [];
   private lastBytesAt = 0;
   private connectionOpenedAt = 0;
-  /** Secondes consécutives d'image noire ou de silence de la source en cours. */
-  private deadS = 0;
+  /**
+   * Début (horodatage du flux) de la série de segments noirs ou muets de la source en cours ;
+   * null si le dernier segment jugé était vivant. Un segment que l'analyse n'a pas pu juger
+   * (processeur chargé) n'interrompt pas la série : la panne se mesure au temps du flux, pas
+   * au nombre de segments analysés.
+   */
+  private deadSinceTs: number | null = null;
   viewers = 0;
   idleSince: number | null = null;
 
@@ -273,6 +278,7 @@ export class Relay {
     this.connectionEnd = 'closed';
     this.connection?.abort();
     this.output.close();
+    this.deps.content?.forget(this.id);
     for (const t of this.transcodedOutputs.values()) t.close();
     this.transcodedOutputs.clear();
     this.rejectWaiters(new RelayUnavailableError('relais fermé'));
@@ -292,7 +298,7 @@ export class Relay {
       const source = this.current;
       // Le morceau en cours est publié s'il est utile ; la suite portera une discontinuité.
       this.breakStreams();
-      this.deadS = 0;
+      this.deadSinceTs = null;
       this.arrivals = [];
       if (end.kind !== 'switch' && end.kind !== 'ended')
         this.deps.metrics.upstreamFailures.inc({ kind: end.kind });
@@ -455,20 +461,28 @@ export class Relay {
     return received < d.slowRatio * expected * (d.slowWindowMs / 1000);
   }
 
-  /** Image noire ou silence : cumulés sur les segments successifs de la même source. */
-  private judgeContent(sourceId: string, data: Buffer, durationS: number): void {
+  /** Image noire ou silence : mesurés sur le temps du flux, depuis le premier segment mort. */
+  private judgeContent(sourceId: string, data: Buffer, durationS: number, startTs: number): void {
     const analyzer = this.deps.content;
-    if (analyzer === undefined) return;
-    void analyzer.analyze(data, durationS).then((v) => {
+    // Relais sans spectateur (délai de grâce) : personne à protéger, l'analyse sert aux autres.
+    if (analyzer === undefined || this.viewers === 0) return;
+    void analyzer.analyze(data, durationS, this.id).then((v) => {
       // Segment non jugé (analyse saturée) ou source déjà quittée : on ne conclut rien.
       if (v === null || sourceId !== this.current.id || this.isClosed()) return;
       const dead =
         (v.hasVideo && v.blackS >= DEAD_SEGMENT_RATIO * durationS) ||
         (v.hasAudio && v.silentS >= DEAD_SEGMENT_RATIO * durationS);
-      this.deadS = dead ? this.deadS + durationS : 0;
-      if (this.deadS < this.options.detection.contentFailureS) return;
-      this.log.warn({ source: sourceId, seconds: this.deadS }, 'image noire ou silence prolongé');
-      this.deadS = 0;
+      if (!dead) {
+        this.deadSinceTs = null;
+        return;
+      }
+      // Verdicts parfois dans le désordre (analyses en parallèle) : on garde le début le plus ancien.
+      if (this.deadSinceTs === null || timestampDelta(startTs, this.deadSinceTs) > 0)
+        this.deadSinceTs = startTs;
+      const deadS = timestampDelta(this.deadSinceTs, startTs) / MPEG_CLOCK_HZ + durationS;
+      if (deadS < this.options.detection.contentFailureS) return;
+      this.log.warn({ source: sourceId, seconds: Math.round(deadS) }, 'image noire ou silence prolongé');
+      this.deadSinceTs = null;
       if (this.sources.length > 1) this.requestSwitch('content');
       else this.emit(this.current, { kind: 'content', at: Date.now() });
     });
@@ -491,7 +505,7 @@ export class Relay {
         ok: true,
         bitrateKbps: Math.round((bytesPerS * 8) / 1000),
       });
-      this.judgeContent(this.current.id, draft.data, draft.durationS);
+      this.judgeContent(this.current.id, draft.data, draft.durationS, draft.startTs);
     }
     const m = this.deps.metrics;
     m.segments.inc();

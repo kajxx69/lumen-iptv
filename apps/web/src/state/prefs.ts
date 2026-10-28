@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { DEFAULT_QUALITY_PREFS, QUALITY_ORDER, type QualityPrefs } from '../player/quality.js';
 
 /**
  * Préférences propres à cet appareil (pas au compte) : le portail affiché, les chaînes
@@ -11,10 +12,30 @@ interface Prefs {
   /** Chaînes (`portail:chaîne`) en « direct au plus près » (LL-HLS) ; les autres en confort. */
   lowLatency: string[];
   toggleLowLatency: (channelKey: string) => void;
+  /** Qualité maximale par réseau, et économie de données. */
+  quality: QualityPrefs;
+  setQualityPrefs: (change: Partial<QualityPrefs>) => void;
 }
 
 const PORTAL_KEY = 'lumen.portal';
 const LOW_LATENCY_KEY = 'lumen.lowLatency';
+const QUALITY_KEY = 'lumen.quality';
+
+function readQuality(): QualityPrefs {
+  try {
+    const parsed = JSON.parse(read(QUALITY_KEY) ?? '{}') as Partial<Record<keyof QualityPrefs, unknown>>;
+    const profile = (v: unknown, fallback: QualityPrefs['wifi']): QualityPrefs['wifi'] =>
+      QUALITY_ORDER.find((q) => q === v) ?? fallback;
+    return {
+      wifi: profile(parsed.wifi, DEFAULT_QUALITY_PREFS.wifi),
+      cellular: profile(parsed.cellular, DEFAULT_QUALITY_PREFS.cellular),
+      unknown: profile(parsed.unknown, DEFAULT_QUALITY_PREFS.unknown),
+      dataSaver: parsed.dataSaver === true,
+    };
+  } catch {
+    return DEFAULT_QUALITY_PREFS;
+  }
+}
 
 function readList(key: string): string[] {
   try {
@@ -46,6 +67,14 @@ export const usePrefs = create<Prefs>((set) => ({
   setPortal: (portalId) => {
     write(PORTAL_KEY, portalId);
     set({ portalId });
+  },
+  quality: readQuality(),
+  setQualityPrefs: (change) => {
+    set((s) => {
+      const quality = { ...s.quality, ...change };
+      write(QUALITY_KEY, JSON.stringify(quality));
+      return { quality };
+    });
   },
   lowLatency: readList(LOW_LATENCY_KEY),
   toggleLowLatency: (channelKey) => {

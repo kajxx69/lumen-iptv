@@ -234,6 +234,13 @@ export const ClientCapabilities = z.object({
 });
 export type ClientCapabilities = z.infer<typeof ClientCapabilities>;
 
+/**
+ * Qualité demandée pour une lecture : la source telle quelle, ou un palier réduit (données
+ * mobiles, réseau lent). « audio » : le son seul, l'image réduite à une vignette quasi fixe.
+ */
+export const QualityProfile = z.enum(['source', 'high', 'medium', 'low', 'audio']);
+export type QualityProfile = z.infer<typeof QualityProfile>;
+
 export const PlaybackRequest = ChannelRef.extend({
   /** La même chaîne sur d'autres portails, par ordre de préférence : le relais y bascule en cas de panne. */
   fallbacks: z.array(ChannelRef).max(MAX_FALLBACK_SOURCES).default([]),
@@ -243,6 +250,7 @@ export const PlaybackRequest = ChannelRef.extend({
    * lecteur joue à 3–5 s du direct. Sinon, confort : 20 s de retard qui absorbent les coupures.
    */
   lowLatency: z.boolean().default(false),
+  quality: QualityProfile.default('source'),
 });
 export type PlaybackRequest = z.infer<typeof PlaybackRequest>;
 
@@ -280,12 +288,15 @@ export const PlaybackStatusDto = z.object({
     .object({ video: z.enum(['copy', 'h264']), audio: z.enum(['copy', 'aac']), hardware: z.boolean() })
     .nullable(),
   /**
-   * La source en cours a des codecs que ce navigateur ne lit pas tels quels (bascule vers une
-   * source d'un autre format) : le lecteur rouvre sa session, qui sera convertie.
+   * Qualité demandée et qualité servie : elles diffèrent le temps d'un changement (la session
+   * passe à la nouvelle sortie au prochain point de rendez-vous, sans coupure).
    */
-  restartRequired: z.boolean(),
+  quality: z.object({ requested: QualityProfile, active: QualityProfile }),
 });
 export type PlaybackStatusDto = z.infer<typeof PlaybackStatusDto>;
+
+export const PlaybackQualityRequest = z.object({ quality: QualityProfile });
+export type PlaybackQualityRequest = z.infer<typeof PlaybackQualityRequest>;
 
 /** Plafond d'un relevé : le lecteur en envoie toutes les 30 s ; au-delà, la valeur est suspecte. */
 const STATS_MAX_MS = 10 * 60_000;

@@ -1,4 +1,4 @@
-import type { ClientCapabilities } from '@lumen/protocol';
+import type { ClientCapabilities, QualityProfile } from '@lumen/protocol';
 import type { FastifyBaseLogger } from 'fastify';
 import { ApiError } from '../http/errors.js';
 import type { Relay } from '../relay/relay.js';
@@ -61,13 +61,17 @@ export class TranscodeService {
    * Sortie transcodée de ce relais pour ces capacités : partagée si elle existe, créée sinon.
    * Le plafond vidéo est jugé sur la source en cours.
    */
-  async acquire(relay: Relay, caps: ClientCapabilities): Promise<TranscodedOutput> {
+  async acquire(
+    relay: Relay,
+    caps: ClientCapabilities,
+    quality: QualityProfile = 'source',
+  ): Promise<TranscodedOutput> {
     const encoder = await this.encoder;
-    const key = capabilitiesKey(caps);
+    const key = `${capabilitiesKey(caps)}@${quality}`;
     let output = relay.transcoded(key);
     if (output === undefined) {
       const streams = relay.programStreams;
-      const video = streams !== null && planOutput(streams, caps).video !== 'copy';
+      const video = streams !== null && planOutput(streams, caps, quality).video !== 'copy';
       if (video && this.activeVideo >= this.options.maxVideo) {
         throw new ApiError(
           503,
@@ -77,6 +81,7 @@ export class TranscodeService {
       }
       const created = new TranscodedOutput(
         caps,
+        quality,
         key,
         `${relay.id}:${key}`,
         relay.mediaOptions,

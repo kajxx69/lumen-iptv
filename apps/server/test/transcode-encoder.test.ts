@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { SOFTWARE_ENCODER, detectEncoder, probeArgs } from '../src/transcode/encoders.js';
 import { transcodeArgs } from '../src/transcode/ffmpeg-args.js';
+import { QUALITY_LADDER } from '../src/transcode/plan.js';
 
 describe('choix de l encodeur H.264', () => {
   it('le premier encodeur matériel qui fonctionne vraiment', async () => {
@@ -42,7 +43,7 @@ describe('choix de l encodeur H.264', () => {
   });
 });
 
-const OPTIONS = { keyframeIntervalS: 2, maxHeight: 720, audioBitrateKbps: 128 };
+const OPTIONS = { maxHeight: 720, audioBitrateKbps: 128 };
 
 describe('arguments FFmpeg d une sortie transcodée', () => {
   it('AC-3 → AAC : la vidéo est copiée, rien n est réencodé', () => {
@@ -55,12 +56,14 @@ describe('arguments FFmpeg d une sortie transcodée', () => {
     expect(args.at(-1)).toBe('pipe:1');
   });
 
-  it('vidéo → H.264 logiciel : réduite à 720p au plus, image clé toutes les 2 s', () => {
+  it('vidéo → H.264 logiciel : réduite à 720p au plus, images clés calées sur la source', () => {
     const args = transcodeArgs({ video: 'h264', audio: 'copy', key: 'h264+copy' }, SOFTWARE_ENCODER, OPTIONS);
     const line = args.join(' ');
     expect(line).toContain('-c:v libx264');
     expect(line).toContain("scale=-2:'min(720,ih)'");
-    expect(line).toContain('-force_key_frames expr:gte(t,n_forced*2)');
+    expect(line).toContain('-force_key_frames source');
+    // Trames audio regroupées : l'emballage MPEG-TS ne double pas le débit d'un flux léger.
+    expect(line).toContain('-muxdelay 0.2');
     expect(line).toContain('-tune zerolatency');
     expect(line).toContain('-c:a copy');
   });
@@ -83,5 +86,29 @@ describe('arguments FFmpeg d une sortie transcodée', () => {
     );
     expect(args.indexOf('-vaapi_device')).toBeLessThan(args.indexOf('-i'));
     expect(args.join(' ')).toContain('hwupload');
+  });
+});
+
+describe('arguments FFmpeg d un palier de qualité', () => {
+  it('480p : réduite à 480 lignes, débit plafonné, horodatages conservés', () => {
+    const line = transcodeArgs(
+      { video: 'h264', audio: 'copy', key: 'h264+copy@medium', ladder: QUALITY_LADDER.medium },
+      SOFTWARE_ENCODER,
+      OPTIONS,
+    ).join(' ');
+    expect(line).toContain("scale=-2:'min(480,ih)'");
+    expect(line).toContain('-maxrate 1000k');
+    expect(line).toContain('-copyts');
+  });
+
+  it('audio seul : une image par seconde, toutes clés, son AAC 64 kbit/s', () => {
+    const line = transcodeArgs(
+      { video: 'h264', audio: 'aac', key: 'h264+aac@audio', ladder: QUALITY_LADDER.audio },
+      SOFTWARE_ENCODER,
+      OPTIONS,
+    ).join(' ');
+    expect(line).toContain('fps=1');
+    expect(line).toContain('-g 1');
+    expect(line).toContain('-b:a 64k');
   });
 });

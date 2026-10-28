@@ -119,8 +119,6 @@ export async function createServer(
           encoder: config.transcodeEncoder,
           maxVideo: config.transcodeMaxVideo,
           transcode: {
-            // Images clés au rythme des segments du relais : chaque segment transcodé démarre sur l'une d'elles.
-            keyframeIntervalS: config.relaySegmentTargetS,
             maxHeight: config.transcodeMaxHeight,
             audioBitrateKbps: config.transcodeAudioBitrateKbps,
           },

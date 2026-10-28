@@ -3,6 +3,7 @@ import { type FormEvent, useState } from 'react';
 import { ApiError } from '../api/client.js';
 import { useAddPortal, useLogout, useMe, usePortals, useRemovePortal } from '../api/queries.js';
 import { MergeSettings } from '../components/MergeSettings.js';
+import { NetworkSettings } from '../components/NetworkSettings.js';
 import { usePrefs } from '../state/prefs.js';
 import { navigate } from '../state/router.js';
 import { ALL_PORTALS, useCurrentPortal } from '../state/use-current-portal.js';
@@ -161,6 +162,7 @@ export function SettingsScreen() {
         ))}
       </div>
       {admin && <AddPortalForm />}
+      <NetworkSettings />
       {realPortals.length > 1 && <MergeSettings admin={admin} />}
       <h2>Session</h2>
       <p className="programme-now">Connecté en tant que {me.data?.username ?? '…'}.</p>

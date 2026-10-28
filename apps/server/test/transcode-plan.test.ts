@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PASSTHROUGH, planOutput } from '../src/transcode/plan.js';
+import { PASSTHROUGH, QUALITY_LADDER, planOutput } from '../src/transcode/plan.js';
 
 const BASE = { hevc: false, ac3: false, eac3: false };
 
@@ -48,5 +48,36 @@ describe('sortie d un relais : copier ou transcoder', () => {
   it('radio (audio seul) et flux sans audio : rien à transcoder côté vidéo', () => {
     expect(planOutput({ videoCodec: null, audioCodec: 'aac' }, BASE)).toEqual(PASSTHROUGH);
     expect(planOutput({ videoCodec: 'h264', audioCodec: null }, BASE)).toEqual(PASSTHROUGH);
+  });
+});
+
+describe('échelle de qualités', () => {
+  it('qualité source : le plan de codec seul, sans réduction', () => {
+    const p = planOutput({ videoCodec: 'h264', audioCodec: 'aac' }, BASE, 'source');
+    expect(p).toEqual(PASSTHROUGH);
+    expect(p.ladder).toBeUndefined();
+  });
+
+  it('qualités réduites : vidéo réencodée à la hauteur et au débit du palier', () => {
+    const medium = planOutput({ videoCodec: 'h264', audioCodec: 'aac' }, BASE, 'medium');
+    expect(medium).toMatchObject({ video: 'h264', audio: 'copy', ladder: QUALITY_LADDER.medium });
+    expect(medium.key).toBe('h264+copy@medium');
+    // Basse qualité : le son aussi est allégé.
+    expect(planOutput({ videoCodec: 'h264', audioCodec: 'aac' }, BASE, 'low')).toMatchObject({
+      audio: 'aac',
+    });
+  });
+
+  it('audio seul : une vignette quasi fixe garde la piste vidéo, presque sans débit', () => {
+    const p = planOutput({ videoCodec: 'mpeg2', audioCodec: 'ac3' }, BASE, 'audio');
+    expect(p).toMatchObject({ video: 'h264', audio: 'aac' });
+    expect(QUALITY_LADDER.audio.videoKbps).toBeLessThan(32);
+    expect(QUALITY_LADDER.audio.fps).toBeLessThanOrEqual(1);
+  });
+
+  it('paliers ordonnés : chacun plus léger que le précédent', () => {
+    const order = ['high', 'medium', 'low', 'audio'] as const;
+    const rates = order.map((q) => QUALITY_LADDER[q].videoKbps);
+    expect([...rates].sort((a, b) => b - a)).toEqual(rates);
   });
 });

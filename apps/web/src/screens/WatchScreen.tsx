@@ -7,11 +7,17 @@ import { useEpg } from '../epg/epg-store.js';
 import { formatTime, nowNext } from '../epg/layout.js';
 import { actionForKey } from '../nav/spatial.js';
 import { focusDefault } from '../nav/use-dpad.js';
+import { dataUsage, formatBytes } from '../player/data-usage.js';
+import { QUALITY_LABEL, QualityController, capFor } from '../player/quality.js';
 import { type PlaybackStats, useHls } from '../player/use-hls.js';
+import { useNetwork } from '../player/use-network.js';
 import { request } from '../api/client.js';
 import { usePlaybackSession } from '../player/use-playback-session.js';
 import { usePrefs } from '../state/prefs.js';
 import { goBack, navigate } from '../state/router.js';
+
+/** Rythme du contrôle automatique de la qualité (débit mesuré, arrêts d'image). */
+const QUALITY_TICK_MS = 5000;
 
 /** Les commandes s'effacent après ce délai sans action : l'image d'abord. */
 const OVERLAY_HIDE_MS = 4000;
@@ -73,7 +79,12 @@ export function WatchScreen({ portalId, channelId }: { portalId: string; channel
   const channelKey = `${portalId}:${channelId}`;
   const lowLatency = usePrefs((s) => s.lowLatency.includes(channelKey));
   const toggleLowLatency = usePrefs((s) => s.toggleLowLatency);
-  const session = usePlaybackSession(portalId, channelId, lowLatency);
+  // Qualité : plafond du réseau (WiFi, données mobiles, économie de données), puis contrôle
+  // automatique selon le débit réel ; les changements se font sans coupure.
+  const network = useNetwork();
+  const qualityPrefs = usePrefs((s) => s.quality);
+  const cap = capFor(network, qualityPrefs);
+  const session = usePlaybackSession(portalId, channelId, lowLatency, cap);
   const streamUrl = session.state.kind === 'ready' ? session.state.playback.streamUrl : null;
   const sessionId = session.state.kind === 'ready' ? session.state.playback.sessionId : null;
   const reportStats = useCallback(
@@ -87,7 +98,36 @@ export function WatchScreen({ portalId, channelId }: { portalId: string; channel
     },
     [sessionId],
   );
-  const player = useHls(videoRef, streamUrl, session.restart, reportStats, lowLatency);
+  const player = useHls(
+    videoRef,
+    streamUrl,
+    session.restart,
+    reportStats,
+    lowLatency,
+    network.slow || network.saveData || qualityPrefs.dataSaver,
+  );
+  const latest = useRef({ status: session.status, cap });
+  latest.current = { status: session.status, cap };
+  const controller = useRef(new QualityController());
+  const { setQuality } = session;
+  const { telemetry } = player;
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const { status: s, cap: c } = latest.current;
+      if (s === null) return;
+      const current = s.quality.requested;
+      const next = controller.current.decide(
+        { now: Date.now(), bandwidthBps: telemetry.bandwidthBps(), stalled: telemetry.takeStall() },
+        current,
+        c,
+      );
+      // Refus (conversions saturées) : la qualité actuelle reste, nouvel essai au prochain tour.
+      if (next !== current) void setQuality(next).catch(() => undefined);
+    }, QUALITY_TICK_MS);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [setQuality, telemetry]);
   const epg = useEpg(portalId, [channelId]);
   const programme = nowNext(epg(channelId) ?? [], Date.now());
   const favorites = useFavorites();
@@ -288,6 +328,15 @@ export function WatchScreen({ portalId, channelId }: { portalId: string; channel
             ⚡ Direct au plus près
           </button>
           <span className="spacer" />
+          {session.status !== null && (
+            <span
+              className="source"
+              data-testid="quality-indicator"
+              title="Qualité servie, et données consommées par cet appareil ce mois-ci"
+            >
+              {QUALITY_LABEL[session.status.quality.active]} · {formatBytes(dataUsage.bytes())} ce mois-ci
+            </span>
+          )}
           {player.latencyS !== null && Number.isFinite(player.latencyS) && (
             <span
               className="source"

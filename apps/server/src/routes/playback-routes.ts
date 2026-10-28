@@ -1,5 +1,6 @@
 import {
   type ChannelHealthDto,
+  PlaybackQualityRequest,
   PlaybackRequest,
   PlaybackStatsRequest,
   type PlaybackStatusDto,
@@ -49,6 +50,13 @@ export function registerPlaybackRoutes(app: FastifyInstance, playback: PlaybackS
     const { sessionId } = parseOr400(SessionParams, req.params);
     playback.recordStats(user, sessionId, parseOr400(PlaybackStatsRequest, req.body));
     return reply.code(204).send();
+  });
+
+  /** Changement de qualité (réseau, économie de données) : appliqué sans recharger la playlist. */
+  app.post('/api/playback/:sessionId/quality', async (req): Promise<PlaybackStatusDto> => {
+    const user = requireUser(req);
+    const { sessionId } = parseOr400(SessionParams, req.params);
+    return playback.setQuality(user, sessionId, parseOr400(PlaybackQualityRequest, req.body).quality);
   });
 
   app.get('/api/playback/:sessionId/seg/:file', async (req, reply) => {

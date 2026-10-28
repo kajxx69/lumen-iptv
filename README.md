@@ -2,11 +2,12 @@
 
 Lecteur IPTV (Stalker Portal) centré sur la résilience. Voir [PROJECT.md](PROJECT.md) pour la spécification.
 
-**État : phase 7** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
+**État : phase 8** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
 comptes et chiffrement des portails (2), relais avec tampon glissant et bascule de source (3),
 client web : catalogue virtualisé, lecteur, guide des programmes, favoris (4), moteur de
 résilience : détection de panne à trois niveaux, score de santé, sondes, tampon adaptatif (5),
-agrégation multi-portails et dédoublonnage (6), transcodage adaptatif et LL-HLS (7).
+agrégation multi-portails et dédoublonnage (6), transcodage adaptatif et LL-HLS (7), adaptation
+au réseau : qualité automatique, économie de données, compteur de consommation (8).
 
 ## Prérequis
 
@@ -296,6 +297,49 @@ Variables : `LUMEN_TRANSCODING`, `LUMEN_TRANSCODE_ENCODER` (`auto`, `software` o
 d'encodeur), `LUMEN_TRANSCODE_MAX_VIDEO`, `LUMEN_TRANSCODE_MAX_HEIGHT`,
 `LUMEN_TRANSCODE_AUDIO_BITRATE_KBPS`, `LUMEN_RELAY_PART_TARGET_S`. Métriques :
 `lumen_transcodes_active`, `lumen_transcodes_video_active`, `lumen_transcode_hardware`.
+
+## Adaptation au réseau
+
+Pensée pour les réseaux mobiles ouest-africains (PROJECT.md) : la qualité suit le débit réel
+du spectateur, sans jamais couper l'image.
+
+**Échelle de qualités**, produite par le serveur à la demande (une sortie transcodée par palier
+et par chaîne, partagée entre spectateurs) :
+
+| Palier     | Image                                           | Débit total                         |
+| ---------- | ----------------------------------------------- | ----------------------------------- |
+| Source     | celle de la chaîne (copiée)                     | ≈ 1,4 Mbit/s sur le portail factice |
+| 720p       | 720 lignes, 2,5 Mbit/s                          | ≈ 2,6 Mbit/s                        |
+| 480p       | 480 lignes, 1 Mbit/s                            | ≈ 1,1 Mbit/s                        |
+| 360p       | 360 lignes, 500 kbit/s, son 64 kbit/s           | ≈ 560 kbit/s                        |
+| Audio seul | vignette à une image par seconde, son 64 kbit/s | **≈ 95 kbit/s**                     |
+
+**Changement sans coupure.** Chaque spectateur a sa propre playlist (vue de session) : changer
+de palier, ou passer à une conversion parce que la source a changé de format, se fait au
+premier segment à image clé qui suit exactement ce qui a été joué, jonction marquée. Les
+sorties converties gardent les horodatages et les images clés de la source : les segments des
+deux sorties tombent aux mêmes instants. Le lecteur ne se réinitialise jamais.
+
+**Qualité automatique** (client) : descend aussitôt sur un arrêt d'image ou un débit trop juste
+pendant 10 s, directement au palier qui tient dans le débit mesuré ; remonte d'un palier quand
+le débit dépasse largement le palier supérieur depuis une minute, sans arrêt depuis deux ;
+30 s de calme entre deux changements. Jamais sous 360p de lui-même : l'audio seul reste un choix.
+
+**Plafond par réseau** (Réglages → Réseau et données, mémorisé sur l'appareil) : WiFi en
+qualité source, données mobiles en 480p par défaut, détectés par l'API Network Information
+et suivis quand le réseau change. **Économie de données** (réglage, ou Save-Data du système) :
+360p au plus. **Compteur de consommation** du mois sur l'écran de lecture et dans les Réglages.
+
+**Réseau instable** (2G/3G, économie de données) : tampon de 30 s dès le départ. **Coupure
+totale de la connexion** : reprise immédiate au retour, sans attendre le délai de nouvel essai.
+
+**Conversions saturées** : une qualité réduite est une préférence, jamais une condition pour
+voir l'image. Sans place pour la produire, la lecture démarre en qualité source et le serveur
+retente toutes les 30 s.
+
+Mesuré dans le navigateur (portail factice) : débit du spectateur bridé à 700 kbit/s, la
+qualité descend seule à 360p, puis 19,5 s lues en 20 s ; après 8 s de coupure totale, la
+lecture repart seule.
 
 ## Arborescence
 

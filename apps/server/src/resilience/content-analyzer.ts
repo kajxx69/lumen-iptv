@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { FairQueue } from './fair-queue.js';
 
 /** Ce que FFmpeg a vu dans un segment : secondes d'image noire et de silence. */
 export interface ContentVerdict {
@@ -9,8 +10,13 @@ export interface ContentVerdict {
 }
 
 export interface ContentAnalyzer {
-  /** null si l'analyse est impossible (FFmpeg absent, file pleine) : le segment n'est pas jugé. */
-  analyze(segment: Buffer, durationS: number): Promise<ContentVerdict | null>;
+  /**
+   * null si l'analyse est impossible (FFmpeg absent) ou dépassée par un segment plus récent du
+   * même relais (`key`) : le segment n'est pas jugé.
+   */
+  analyze(segment: Buffer, durationS: number, key: string): Promise<ContentVerdict | null>;
+  /** Le relais `key` est fermé : sa demande en attente est abandonnée. */
+  forget(key: string): void;
 }
 
 /**
@@ -55,18 +61,29 @@ export function parseVerdict(stderr: string, durationS: number): ContentVerdict 
  * prend un peu plus longtemps, la lecture n'en souffre jamais.
  */
 export class FfmpegContentAnalyzer implements ContentAnalyzer {
-  private running = 0;
   private disabled = false;
+  /** Analyses partagées équitablement entre relais : aucun ne monopolise FFmpeg. */
+  private readonly queue: FairQueue<{ segment: Buffer; durationS: number }, ContentVerdict | null>;
 
   constructor(
     private readonly ffmpegPath: string,
-    private readonly maxConcurrent: number,
+    maxConcurrent: number,
     private readonly onUnavailable: () => void = () => undefined,
-  ) {}
+  ) {
+    this.queue = new FairQueue(maxConcurrent, ({ segment, durationS }) => this.run(segment, durationS));
+  }
 
-  analyze(segment: Buffer, durationS: number): Promise<ContentVerdict | null> {
-    if (this.disabled || this.running >= this.maxConcurrent) return Promise.resolve(null);
-    this.running++;
+  async analyze(segment: Buffer, durationS: number, key: string): Promise<ContentVerdict | null> {
+    if (this.disabled) return null;
+    return (await this.queue.submit(key, { segment, durationS })) ?? null;
+  }
+
+  forget(key: string): void {
+    this.queue.forget(key);
+  }
+
+  private run(segment: Buffer, durationS: number): Promise<ContentVerdict | null> {
+    if (this.disabled) return Promise.resolve(null);
     return new Promise<ContentVerdict | null>((resolve) => {
       const child = spawn(
         this.ffmpegPath,
@@ -92,8 +109,6 @@ export class FfmpegContentAnalyzer implements ContentAnalyzer {
       });
       child.stdin.on('error', () => undefined);
       child.stdin.end(segment);
-    }).finally(() => {
-      this.running--;
     });
   }
 }

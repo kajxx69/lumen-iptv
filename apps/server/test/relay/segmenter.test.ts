@@ -65,6 +65,8 @@ describe('découpeur MPEG-TS', () => {
     // Les horodatages s'enchaînent exactement d'un segment à l'autre.
     const firsts = out.map((d) => videoPts(d.data)[0]);
     expect(firsts).toEqual([900_000, 1_080_000, 1_260_000, 1_440_000]);
+    // Chaque segment connaît l'horodatage de sa première image (recalage entre sorties).
+    expect(out.map((d) => d.startTs)).toEqual(firsts);
   });
 
   it('résultat identique quel que soit le découpage réseau des octets', () => {

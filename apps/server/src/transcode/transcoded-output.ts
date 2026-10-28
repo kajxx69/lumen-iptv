@@ -1,6 +1,6 @@
 import { type ChildProcessByStdio, spawn } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
-import type { ClientCapabilities } from '@lumen/protocol';
+import type { ClientCapabilities, QualityProfile } from '@lumen/protocol';
 import type { FastifyBaseLogger } from 'fastify';
 import { MediaOutput, type MediaOutputOptions } from '../relay/media-output.js';
 import type { ProgramStreams } from '../relay/mpegts.js';
@@ -56,7 +56,8 @@ export class TranscodedOutput {
 
   constructor(
     readonly caps: ClientCapabilities,
-    /** Identifie la sortie dans son relais : une par jeu de capacités. */
+    readonly quality: QualityProfile,
+    /** Identifie la sortie dans son relais : une par jeu de capacités et par qualité. */
     readonly key: string,
     cacheKey: string,
     mediaOptions: MediaOutputOptions,
@@ -82,7 +83,7 @@ export class TranscodedOutput {
   }
 
   private planAndSpawn(streams: ProgramStreams): void {
-    this.plan = planOutput(streams, this.caps);
+    this.plan = planOutput(streams, this.caps, this.quality);
     const seed = this.waiting ?? [];
     this.waiting = null;
     this.waitingBytes = 0;

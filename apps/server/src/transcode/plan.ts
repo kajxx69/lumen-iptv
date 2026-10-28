@@ -1,4 +1,4 @@
-import type { ClientCapabilities } from '@lumen/protocol';
+import type { ClientCapabilities, QualityProfile } from '@lumen/protocol';
 import type { AudioCodec, VideoCodec } from '../relay/mpegts.js';
 
 /**
@@ -9,11 +9,36 @@ import type { AudioCodec, VideoCodec } from '../relay/mpegts.js';
 export type VideoAction = 'copy' | 'h264';
 export type AudioAction = 'copy' | 'aac';
 
+/** Un palier de qualité réduite : la vidéo est réencodée à cette taille et à ce débit. */
+export interface QualityStep {
+  height: number;
+  videoKbps: number;
+  /** Débit du son converti en AAC ; null : le son garde sa qualité (copié si possible). */
+  audioKbps: number | null;
+  /** Images par seconde imposées ; null : celles de la source. */
+  fps: number | null;
+}
+
+/**
+ * Échelle de qualités (PROJECT.md, adaptation au réseau). Débits usuels d'un flux H.264 en
+ * direct : 720p net sur un téléviseur, 480p confortable sur téléphone, 360p pour un réseau
+ * mobile faible. « audio » garde une vignette à une image par seconde : la piste vidéo
+ * subsiste (le lecteur ne change jamais de type de flux), pour presque aucun octet.
+ */
+export const QUALITY_LADDER: Record<Exclude<QualityProfile, 'source'>, QualityStep> = {
+  high: { height: 720, videoKbps: 2500, audioKbps: null, fps: null },
+  medium: { height: 480, videoKbps: 1000, audioKbps: null, fps: null },
+  low: { height: 360, videoKbps: 500, audioKbps: 64, fps: null },
+  audio: { height: 144, videoKbps: 16, audioKbps: 64, fps: 1 },
+};
+
 export interface OutputPlan {
   video: VideoAction;
   audio: AudioAction;
   /** Identifie la sortie : deux spectateurs de même plan partagent le même transcodage. */
   key: string;
+  /** Palier de qualité réduite ; absent : qualité de la source. */
+  ladder?: QualityStep;
 }
 
 const plan = (video: VideoAction, audio: AudioAction): OutputPlan => ({
@@ -58,6 +83,15 @@ function audioAction(codec: AudioCodec | null, caps: ClientCapabilities): AudioA
   }
 }
 
-export function planOutput(codecs: StreamCodecs, caps: ClientCapabilities): OutputPlan {
-  return plan(videoAction(codecs.videoCodec, caps), audioAction(codecs.audioCodec, caps));
+export function planOutput(
+  codecs: StreamCodecs,
+  caps: ClientCapabilities,
+  quality: QualityProfile = 'source',
+): OutputPlan {
+  const audio = audioAction(codecs.audioCodec, caps);
+  if (quality === 'source' || codecs.videoCodec === null)
+    return plan(videoAction(codecs.videoCodec, caps), audio);
+  const ladder = QUALITY_LADDER[quality];
+  const reducedAudio = ladder.audioKbps === null ? audio : 'aac';
+  return { video: 'h264', audio: reducedAudio, key: `h264+${reducedAudio}@${quality}`, ladder };
 }

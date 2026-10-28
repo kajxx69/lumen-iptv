@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { request } from 'node:http';
 import { Writable } from 'node:stream';
 import { type FakePortalConfigInput, type RunningPortal, sendChaos, startPortal } from '@lumen/fake-portal';
-import type { PlaybackDto, PortalDto } from '@lumen/protocol';
+import type { PlaybackDto, PortalDto, QualityProfile } from '@lumen/protocol';
 import { type ServerConfigInput, resolveConfig } from '../src/config.js';
 import { type MediaPlaylist, parsePlaylist } from '../src/relay/hls-parser.js';
 import { type LumenServer, createServer } from '../src/server.js';
@@ -230,6 +230,7 @@ export async function startPlayback(
     fallbacks?: { portalId: string; channelId: string }[];
     caps?: { hevc?: boolean; ac3?: boolean; eac3?: boolean };
     lowLatency?: boolean;
+    quality?: QualityProfile;
   },
 ): Promise<PlaybackDto> {
   const res = await client.post<PlaybackDto>('/api/playback', body);
@@ -316,6 +317,38 @@ export function probeCodecs(segment: Buffer): Promise<{ video: string | null; au
         video: streams.find((s) => s.codec_type === 'video')?.codec_name ?? null,
         audio: streams.find((s) => s.codec_type === 'audio')?.codec_name ?? null,
       });
+    });
+    child.stdin.on('error', () => undefined);
+    child.stdin.end(segment);
+  });
+}
+
+/** Hauteur de l'image d'un segment MPEG-TS (ffprobe), null sans vidéo. */
+export function probeHeight(segment: Buffer): Promise<number | null> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      FFPROBE,
+      [
+        '-hide_banner',
+        '-v',
+        'error',
+        '-select_streams',
+        'v:0',
+        '-show_entries',
+        'stream=height',
+        '-of',
+        'json',
+        '-i',
+        'pipe:0',
+      ],
+      { stdio: ['pipe', 'pipe', 'ignore'] },
+    );
+    let out = '';
+    child.stdout.on('data', (c: Buffer) => (out += c.toString()));
+    child.on('error', reject);
+    child.on('close', () => {
+      const streams = (JSON.parse(out || '{}') as { streams?: { height?: number }[] }).streams ?? [];
+      resolve(streams[0]?.height ?? null);
     });
     child.stdin.on('error', () => undefined);
     child.stdin.end(segment);

@@ -36,6 +36,12 @@ export const ADAPTIVE_BUFFER: AdaptiveBufferOptions = {
 };
 
 /**
+ * Réseau instable (2G/3G, économie de données) : plancher de 30 s dès le départ (PROJECT.md :
+ * « tampon agressif au démarrage sur réseau détecté comme instable »).
+ */
+export const ADAPTIVE_BUFFER_UNSTABLE: AdaptiveBufferOptions = { ...ADAPTIVE_BUFFER, baseS: 30 };
+
+/**
  * « Direct au plus près » : le spectateur a choisi la latence. Plancher de 3 s (PROJECT.md :
  * 3–5 s), plafond de 8 s quand le réseau peine : au-delà, ce ne serait plus du direct.
  */

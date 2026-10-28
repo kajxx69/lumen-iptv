@@ -9,6 +9,7 @@ import {
   type PlaybackRequest,
   type PlaybackStatsRequest,
   type PlaybackStatusDto,
+  type QualityProfile,
 } from '@lumen/protocol';
 import type { FastifyBaseLogger } from 'fastify';
 import type { CatalogService } from '../catalog/catalog-service.js';
@@ -21,9 +22,9 @@ import type { Relay, RelaySource } from '../relay/relay.js';
 import type { RelayManager } from '../relay/relay-manager.js';
 import type { AuthUser } from '../store/auth-store.js';
 import type { LibraryStore } from '../store/library-store.js';
-import type { MediaOutput } from '../relay/media-output.js';
 import { PASSTHROUGH, planOutput } from '../transcode/plan.js';
-import type { TranscodeService } from '../transcode/transcode-service.js';
+import { type TranscodeService, capabilitiesKey } from '../transcode/transcode-service.js';
+import { SessionView, type ViewSource } from './session-view.js';
 import type { TranscodedOutput } from '../transcode/transcoded-output.js';
 
 /** URI des segments et de leurs parties, relatives à la playlist : `seg/<n>.ts`, `seg/<n>.<partie>.ts`. */
@@ -37,6 +38,13 @@ const segmentUri = (seq: number, part?: number): string =>
 const BLOCKING_RELOAD_MAX_MS = 8000;
 /** Un lecteur peut demander au plus le segment d'après le prochain. */
 const MAX_BLOCKING_AHEAD_SEGMENTS = 2;
+/** Clé de la sortie directe du relais (le flux tel quel). */
+const DIRECT = 'direct';
+/**
+ * Qualité réduite refusée (conversions saturées) : la session lit la source et retente au bout
+ * de ce délai. Une qualité réduite est une préférence ; elle ne doit jamais priver d'image.
+ */
+const QUALITY_RETRY_MS = 30_000;
 
 interface ViewerSession {
   id: string;
@@ -47,10 +55,22 @@ interface ViewerSession {
   attached: boolean;
   /** « Direct au plus près » : la playlist de cette session annonce les parties (LL-HLS). */
   lowLatency: boolean;
-  /** Ce que lit ce spectateur : la sortie directe du relais, ou une sortie transcodée. */
-  output: MediaOutput;
+  /** Playlist propre au spectateur, quelle que soit la sortie qu'il lit (voir SessionView). */
+  view: SessionView;
+  /** Sortie voulue en ce moment : DIRECT, ou la clé d'une sortie transcodée. */
+  currentKey: string;
+  /** Sortie transcodée voulue en ce moment ; null : la sortie directe. */
   transcoded: TranscodedOutput | null;
+  /** Sorties transcodées encore lues par la vue : libérées dès qu'elle les a quittées. */
+  held: Map<ViewSource, TranscodedOutput>;
   caps: PlaybackRequest['caps'];
+  /** Qualité demandée par le lecteur, et celle servie (elles diffèrent le temps d'un changement). */
+  quality: QualityProfile;
+  activeQuality: QualityProfile;
+  /** Changement de sortie en cours (un seul à la fois). */
+  switching: Promise<void> | null;
+  /** Qualité réduite refusée : qualité source jusqu'à cet instant, puis nouvel essai. */
+  qualityRetryAt: number;
   log: FastifyBaseLogger;
 }
 
@@ -102,9 +122,15 @@ export class PlaybackService {
       lastSeen: Date.now(),
       attached: false,
       lowLatency: request.lowLatency,
-      output: relay.output,
+      view: this.newView(relay, relay.output),
+      currentKey: DIRECT,
       transcoded: null,
+      held: new Map(),
       caps: request.caps,
+      quality: request.quality,
+      activeQuality: 'source',
+      switching: null,
+      qualityRetryAt: 0,
       log,
     };
     this.sessions.set(id, session);
@@ -116,7 +142,7 @@ export class PlaybackService {
       log.warn({ sources: sources.length }, 'lecture impossible : aucune source ne répond');
       throw new ApiError(502, 'stream_unavailable', 'la chaîne ne répond pas, sur aucune de ses sources');
     }
-    await this.chooseOutput(session, request.caps);
+    await this.ensureOutput(session, true);
     log.info(
       { portal: request.portalId, channel: request.channelId, fallbacks: request.fallbacks.length },
       'lecture démarrée',
@@ -128,57 +154,153 @@ export class PlaybackService {
     return { sessionId: id, streamUrl: `/api/playback/${id}/index.m3u8`, format: 'hls' };
   }
 
-  /**
-   * Sortie de la session selon ce que le navigateur sait lire : le flux tel quel si possible,
-   * sinon une sortie transcodée (partagée avec les autres spectateurs du même besoin).
-   */
-  private async chooseOutput(session: ViewerSession, caps: PlaybackRequest['caps']): Promise<void> {
+  private newView(relay: Relay, source: ViewSource): SessionView {
+    const o = relay.mediaOptions;
+    return new SessionView(source, o.bufferS, {
+      targetDurationS: o.targetDurationS,
+      holdBackS: o.holdBackS,
+      partTargetS: o.segmenter.partTargetS,
+      partHoldBackS: o.partHoldBackS,
+    });
+  }
+
+  /** Sortie qu'il faut à ce spectateur : la directe si son navigateur lit le flux tel quel en qualité source. */
+  private desiredKey(session: ViewerSession): string {
     const streams = session.relay.programStreams;
-    const plan = streams === null ? PASSTHROUGH : planOutput(streams, caps);
-    if (plan.key === PASSTHROUGH.key) return;
-    const fail = (
-      status: number,
-      code: 'unsupported_codec' | 'stream_unavailable',
-      message: string,
-    ): never => {
-      this.sessions.delete(session.id);
-      this.relays.release(session.relay);
-      throw new ApiError(status, code, message);
+    const quality = this.effectiveQuality(session);
+    const plan = streams === null ? PASSTHROUGH : planOutput(streams, session.caps, quality);
+    return plan.key === PASSTHROUGH.key ? DIRECT : `${capabilitiesKey(session.caps)}@${quality}`;
+  }
+
+  /** Qualité à servir : celle demandée, sauf pendant le délai qui suit un refus (source). */
+  private effectiveQuality(session: ViewerSession): QualityProfile {
+    return Date.now() < session.qualityRetryAt ? 'source' : session.quality;
+  }
+
+  /**
+   * Sortie de la session selon ce que le navigateur sait lire et la qualité demandée : le flux
+   * tel quel si possible, sinon une sortie transcodée (partagée avec les spectateurs du même
+   * besoin). Au démarrage, un échec est une erreur de lecture ; ensuite, la session garde
+   * simplement ce qu'elle lit (le lecteur ne voit jamais de coupure pour un changement raté).
+   */
+  private async ensureOutput(session: ViewerSession, initial = false): Promise<void> {
+    const key = this.desiredKey(session);
+    if (key === session.currentKey) return;
+    const relay = session.relay;
+    if (key === DIRECT) {
+      session.view.switchTo(relay.output);
+      session.currentKey = DIRECT;
+      session.transcoded = null;
+      session.activeQuality = 'source';
+      this.releaseUnused(session);
+      return;
+    }
+    const abandon = (err: unknown): never => {
+      if (initial) {
+        this.sessions.delete(session.id);
+        this.relays.release(relay);
+      }
+      throw err;
     };
     if (this.transcodes === null) {
-      fail(
-        415,
-        'unsupported_codec',
-        'ce navigateur ne lit pas le format de cette chaîne, et la conversion est désactivée',
+      abandon(
+        new ApiError(
+          415,
+          'unsupported_codec',
+          'ce navigateur ne lit pas le format de cette chaîne, et la conversion est désactivée',
+        ),
       );
       return;
     }
+    const quality = this.effectiveQuality(session);
     let output: TranscodedOutput;
     try {
-      output = await this.transcodes.acquire(session.relay, caps);
+      output = await this.transcodes.acquire(relay, session.caps, quality);
     } catch (err) {
-      this.sessions.delete(session.id);
-      this.relays.release(session.relay);
-      throw err;
+      if (initial && quality !== 'source' && err instanceof ApiError && err.code === 'transcode_busy') {
+        // Pas de place pour une qualité réduite : la lecture démarre quand même, en qualité source.
+        session.qualityRetryAt = Date.now() + QUALITY_RETRY_MS;
+        session.log.warn({ quality }, 'qualité réduite indisponible (conversions saturées) : qualité source');
+        await this.ensureOutput(session, true);
+        return;
+      }
+      abandon(err);
+      return;
     }
     try {
       await output.ready(this.config.relayStartTimeoutMs);
     } catch {
-      this.transcodes.release(session.relay, output);
-      fail(502, 'stream_unavailable', 'la conversion de cette chaîne n’a pas démarré');
+      this.transcodes.release(relay, output);
+      abandon(new ApiError(502, 'stream_unavailable', 'la conversion de cette chaîne n’a pas démarré'));
+      return;
     }
-    session.output = output.output;
+    if (this.sessions.get(session.id) !== session) {
+      // Session fermée pendant l'attente : rien à brancher.
+      this.transcodes.release(relay, output);
+      return;
+    }
+    session.held.set(output.output, output);
+    if (initial) session.view = this.newView(relay, output.output);
+    else session.view.switchTo(output.output);
+    session.currentKey = key;
     session.transcoded = output;
-    session.log.info({ plan: plan.key, codecs: streams }, 'flux converti pour ce navigateur');
+    session.activeQuality = quality;
+    session.log.info({ output: key, plan: output.plan?.key ?? null }, 'sortie de la session choisie');
+    this.releaseUnused(session);
+  }
+
+  /** Sorties transcodées que la vue n'utilise plus (ni en cours, ni dans sa fenêtre) : libérées. */
+  private releaseUnused(session: ViewerSession): void {
+    const used = session.view.sourcesInUse();
+    for (const [source, output] of session.held) {
+      if (used.has(source)) continue;
+      session.held.delete(source);
+      this.transcodes?.release(session.relay, output);
+    }
+  }
+
+  /**
+   * Vérifie, à chaque playlist, que la session lit la bonne sortie (nouvelle source d'un autre
+   * format, qualité changée) et lance le changement en arrière-plan, sans faire attendre.
+   */
+  private refreshOutput(session: ViewerSession): void {
+    this.releaseUnused(session);
+    if (session.switching !== null || this.desiredKey(session) === session.currentKey) return;
+    session.switching = this.ensureOutput(session)
+      .catch((err: unknown) => {
+        // Nouvel essai plus tard, pas à chaque playlist (toutes les 2 s).
+        session.qualityRetryAt = Date.now() + QUALITY_RETRY_MS;
+        session.log.warn(
+          { err: err instanceof Error ? err.message : 'inconnue' },
+          'changement de sortie impossible : la session garde la sienne',
+        );
+      })
+      .finally(() => {
+        session.switching = null;
+      });
+  }
+
+  /** Qualité demandée par le lecteur (réseau, économie de données) : appliquée sans coupure. */
+  async setQuality(user: AuthUser, sessionId: string, quality: QualityProfile): Promise<PlaybackStatusDto> {
+    const session = this.owned(user, sessionId);
+    const previous = session.quality;
+    session.quality = quality;
+    await session.switching;
+    try {
+      await this.ensureOutput(session);
+    } catch (err) {
+      // Refus (conversions saturées) : la qualité précédente reste demandée et servie.
+      session.quality = previous;
+      throw err;
+    }
+    return this.status(user, sessionId);
   }
 
   status(user: AuthUser, sessionId: string): PlaybackStatusDto {
     const session = this.owned(user, sessionId);
     const relay = session.relay;
     const state = relay.state;
-    const t = session.transcoded;
-    const streams = relay.programStreams;
-    const plan = t?.plan ?? null;
+    const plan = session.transcoded?.plan ?? null;
     // Un relais fermé sous la session (arrêt du serveur) se présente comme en reprise.
     return {
       state: state === 'closed' ? 'recovering' : state,
@@ -191,8 +313,7 @@ export class PlaybackService {
               audio: plan.audio,
               hardware: this.transcodes?.encoderChoice?.hardware ?? false,
             },
-      restartRequired:
-        t === null && streams !== null && planOutput(streams, session.caps).key !== PASSTHROUGH.key,
+      quality: { requested: session.quality, active: session.activeQuality },
     };
   }
 
@@ -315,22 +436,19 @@ export class PlaybackService {
       session.attached = true;
       session.log.info({ state: session.relay.state }, 'lecteur rattaché au relais');
     }
-    const output = session.output;
+    this.refreshOutput(session);
+    const view = session.view;
     if (waitForSeq !== undefined) {
       // Trop loin dans le futur : le lecteur se trompe (RFC 8216bis : 400).
-      if (waitForSeq > output.nextSeq + MAX_BLOCKING_AHEAD_SEGMENTS) {
+      if (waitForSeq > view.nextSeq + MAX_BLOCKING_AHEAD_SEGMENTS) {
         throw new ApiError(400, 'bad_request', 'segment demandé trop loin dans le futur');
       }
       if (session.relay.state !== 'closed') {
-        await output.waitFor(
-          waitForSeq,
-          session.lowLatency ? waitForPart : undefined,
-          BLOCKING_RELOAD_MAX_MS,
-        );
+        await view.waitFor(waitForSeq, session.lowLatency ? waitForPart : undefined, BLOCKING_RELOAD_MAX_MS);
       }
       session.lastSeen = Date.now();
     }
-    return output.playlist(segmentUri, session.lowLatency);
+    return session.view.playlist(segmentUri, session.lowLatency);
   }
 
   recordStats(user: AuthUser, sessionId: string, stats: PlaybackStatsRequest): void {
@@ -345,12 +463,12 @@ export class PlaybackService {
    */
   async segment(user: AuthUser, sessionId: string, seq: number, part?: number): Promise<Buffer> {
     const session = this.owned(user, sessionId);
-    const output = session.output;
-    let data = part === undefined ? output.segment(seq) : output.part(seq, part);
-    if (data === undefined && part !== undefined && seq === output.nextSeq) {
-      await output.waitFor(seq, part, BLOCKING_RELOAD_MAX_MS);
+    const view = session.view;
+    let data = part === undefined ? view.segment(seq) : view.part(seq, part);
+    if (data === undefined && part !== undefined && seq === view.nextSeq) {
+      await view.waitFor(seq, part, BLOCKING_RELOAD_MAX_MS);
       session.lastSeen = Date.now();
-      data = output.part(seq, part);
+      data = view.part(seq, part);
     }
     if (data === undefined) throw notFound('segment');
     this.relays.metrics.bytesOut.inc({}, data.length);
@@ -363,7 +481,8 @@ export class PlaybackService {
 
   private close(session: ViewerSession, reason: string): void {
     if (!this.sessions.delete(session.id)) return;
-    if (session.transcoded !== null) this.transcodes?.release(session.relay, session.transcoded);
+    for (const output of session.held.values()) this.transcodes?.release(session.relay, output);
+    session.held.clear();
     this.relays.release(session.relay);
     session.log.info({ reason }, 'lecture terminée');
   }

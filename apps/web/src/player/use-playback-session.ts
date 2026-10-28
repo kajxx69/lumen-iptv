@@ -1,8 +1,11 @@
-import { PlaybackDto, PlaybackStatusDto } from '@lumen/protocol';
+import { PlaybackDto, PlaybackStatusDto, type QualityProfile } from '@lumen/protocol';
 import Hls from 'hls.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, OfflineError, request, requestJson } from '../api/client.js';
 import { detectCapabilities } from './capabilities.js';
+import { QUALITY_ORDER } from './quality.js';
+
+const rankOf = (q: QualityProfile): number => QUALITY_ORDER.indexOf(q);
 
 /** Après un échec de démarrage, nouvelle tentative automatique : l'utilisateur n'a rien à faire. */
 const START_RETRY_MS = 10_000;
@@ -63,16 +66,24 @@ export function usePlaybackSession(
   portalId: string,
   channelId: string,
   lowLatency = false,
+  /** Qualité de départ (plafond du réseau) ; la suite change par `setQuality`, sans nouvelle session. */
+  initialQuality: QualityProfile = 'source',
 ): {
   state: SessionState;
   status: PlaybackStatusDto | null;
   /** À appeler quand le flux ne répond plus (session perdue) : une nouvelle session est ouverte. */
   restart: () => void;
+  /** Change la qualité de la session en cours, sans coupure (le serveur bascule de sortie). */
+  setQuality: (quality: QualityProfile) => Promise<void>;
 } {
   const [state, setState] = useState<SessionState>({ kind: 'starting' });
   const [status, setStatus] = useState<PlaybackStatusDto | null>(null);
   const [attempt, setAttempt] = useState(0);
   const sessionRef = useRef<string | null>(null);
+  // Qualité au moment d'ouvrir une session : la changer ne doit pas en rouvrir une.
+  const qualityRef = useRef(initialQuality);
+  // Plafond qui baisse (passage aux données mobiles) : appliqué ; sinon, la qualité acquise reste.
+  if (rankOf(initialQuality) > rankOf(qualityRef.current)) qualityRef.current = initialQuality;
 
   useEffect(() => {
     let cancelled = false;
@@ -83,7 +94,7 @@ export function usePlaybackSession(
     const caps = detectCapabilities(Hls.isSupported());
     requestJson(PlaybackDto, '/api/playback', {
       method: 'POST',
-      body: { portalId, channelId, caps, lowLatency },
+      body: { portalId, channelId, caps, lowLatency, quality: qualityRef.current },
     })
       .then((playback) => {
         if (cancelled) {
@@ -131,8 +142,6 @@ export function usePlaybackSession(
         .then((s) => {
           if (cancelled) return;
           setStatus(s);
-          // Nouvelle source d'un autre format : une nouvelle session, convertie pour ce navigateur.
-          if (s.restartRequired) setAttempt((a) => a + 1);
         })
         .catch(() => undefined);
     };
@@ -148,5 +157,30 @@ export function usePlaybackSession(
     setAttempt((a) => a + 1);
   }, []);
 
-  return { state, status, restart };
+  // Démarrage en échec pendant une coupure réseau : nouvel essai dès le retour de la connexion.
+  const failed = state.kind === 'error' && state.retrying;
+  useEffect(() => {
+    if (!failed) return;
+    window.addEventListener('online', restart);
+    return () => {
+      window.removeEventListener('online', restart);
+    };
+  }, [failed, restart]);
+
+  const setQuality = useCallback(
+    async (quality: QualityProfile): Promise<void> => {
+      if (sessionId === null) return;
+      const next = await requestJson(
+        PlaybackStatusDto,
+        `/api/playback/${encodeURIComponent(sessionId)}/quality`,
+        { method: 'POST', body: { quality } },
+      );
+      setStatus(next);
+      // Session rouverte plus tard (serveur redémarré, flux perdu) : elle reprend cette qualité.
+      qualityRef.current = quality;
+    },
+    [sessionId],
+  );
+
+  return { state, status, restart, setQuality };
 }

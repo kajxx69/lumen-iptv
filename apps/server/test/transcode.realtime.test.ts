@@ -9,6 +9,7 @@ import {
   decodeErrors,
   fetchSegment,
   probeCodecs,
+  probeHeight,
   readPlaylist,
   sendChaos,
   startPlayback,
@@ -126,7 +127,7 @@ describe('transcodage : seulement ce que le navigateur ne lit pas', () => {
     expect(again.status).toBe(201);
   });
 
-  it('bascule vers une source d un autre format : la conversion suit, le flux tel quel demande une relance', async () => {
+  it('bascule vers une source d un autre format : la conversion suit, le flux tel quel se convertit sans coupure', async () => {
     const a = await startPortal({ channelCount: 20, media: { audioCodec: 'ac3' } });
     const b = await startPortal({
       channelCount: 20,
@@ -154,8 +155,9 @@ describe('transcodage : seulement ce que le navigateur ne lit pas', () => {
       caps: { ...NO_CAPS, ac3: true },
       fallbacks,
     });
-    expect((await status(srv, native)).restartRequired).toBe(false);
+    expect((await status(srv, native)).transcode).toBeNull();
     await sessionStream(srv, converted);
+    await sessionStream(srv, native);
 
     await sendChaos(a.baseUrl, 'drop', { durationMs: 60_000, channelId: CHANNEL });
     // B diffuse en MPEG-2 : la sortie convertie passe à la vidéo transcodée…
@@ -177,8 +179,95 @@ describe('transcodage : seulement ce que le navigateur ne lit pas', () => {
       await Promise.all(fresh.slice(0, 2).map((s) => fetchSegment(srv.admin, s.uri))),
     );
     expect(await probeCodecs(after)).toEqual({ video: 'h264', audio: 'aac' });
-    // … et le spectateur servi tel quel est prié de rouvrir sa session (il recevra une conversion).
-    expect((await status(srv, native)).restartRequired).toBe(true);
+    // … et le spectateur servi tel quel passe de lui-même sur une sortie convertie, dans la
+    // même playlist (numérotation continue, jonction marquée) : aucune session à rouvrir.
+    await waitFor(
+      'conversion du spectateur natif',
+      async () => {
+        await readPlaylist(srv.admin, native.streamUrl);
+        return (await status(srv, native)).transcode?.video === 'h264' ? true : undefined;
+      },
+      30_000,
+    );
+    const nativeAfter = await waitFor(
+      'segments convertis pour le spectateur natif',
+      async () => {
+        const s = (await readPlaylist(srv.admin, native.streamUrl)).playlist.segments;
+        const last = s.at(-1);
+        return last !== undefined &&
+          (await probeCodecs(await fetchSegment(srv.admin, last.uri))).video === 'h264'
+          ? s
+          : undefined;
+      },
+      30_000,
+    );
+    nativeAfter.forEach((seg, i) => {
+      if (i > 0) expect(seg.seq).toBe(nativeAfter[i - 1]!.seq + 1);
+    });
+  });
+
+  it('changement de qualité en cours de lecture : même playlist, audio seul allégé, retour à la source', async () => {
+    const { srv, dto } = await stack({});
+    const pb = await startPlayback(srv.admin, { portalId: dto.id, channelId: CHANNEL, caps: NO_CAPS });
+    const before = (await readPlaylist(srv.admin, pb.streamUrl)).playlist.segments;
+    const sourceBytes =
+      (await fetchSegment(srv.admin, before.at(-1)?.uri ?? '')).length / (before.at(-1)?.durationS ?? 1);
+
+    const audio = await srv.admin.post<PlaybackStatusDto>(`/api/playback/${pb.sessionId}/quality`, {
+      quality: 'audio',
+    });
+    expect(audio.status).toBe(200);
+    expect(audio.body.quality).toEqual({ requested: 'audio', active: 'audio' });
+    // La playlist continue : au prochain point de rendez-vous, l'image n'est plus qu'une vignette.
+    const light = await waitFor(
+      'segments audio seul',
+      async () => {
+        const s = (await readPlaylist(srv.admin, pb.streamUrl)).playlist.segments;
+        const junction = s.findIndex((x, i) => i > 0 && x.discontinuity);
+        return junction > 0 && s.length - junction >= 2 ? s.slice(junction) : undefined;
+      },
+      30_000,
+    );
+    const lightSeg = await fetchSegment(srv.admin, light[1]?.uri ?? '');
+    expect(await probeHeight(lightSeg)).toBeLessThanOrEqual(144);
+    const lightBytes = lightSeg.length / (light[1]?.durationS ?? 1);
+    console.log(
+      `débit source : ${Math.round((sourceBytes * 8) / 1000)} kbit/s, audio seul : ${Math.round((lightBytes * 8) / 1000)} kbit/s`,
+    );
+    expect(lightBytes).toBeLessThan(sourceBytes / 4);
+    const all = (await readPlaylist(srv.admin, pb.streamUrl)).playlist.segments;
+    all.forEach((seg, i) => {
+      if (i > 0) expect(seg.seq).toBe(all[i - 1]!.seq + 1);
+    });
+
+    // Retour à la qualité source : la sortie directe, sans transcodage.
+    const back = await srv.admin.post<PlaybackStatusDto>(`/api/playback/${pb.sessionId}/quality`, {
+      quality: 'source',
+    });
+    expect(back.body.transcode).toBeNull();
+    expect(back.body.quality.active).toBe('source');
+  });
+
+  it('qualité réduite impossible (conversions saturées) : la lecture démarre quand même, en qualité source', async () => {
+    const { srv, dto } = await stack({}, { transcodeMaxVideo: 1 });
+    const first = await startPlayback(srv.admin, {
+      portalId: dto.id,
+      channelId: CHANNEL,
+      caps: NO_CAPS,
+      quality: 'low',
+    });
+    expect((await status(srv, first)).quality.active).toBe('low');
+    // Plus de place : la qualité réduite reste demandée, la source est servie en attendant.
+    const second = await srv.admin.post<PlaybackDto>('/api/playback', {
+      portalId: dto.id,
+      channelId: '2',
+      caps: NO_CAPS,
+      quality: 'low',
+    });
+    expect(second.status).toBe(201);
+    const s2 = await status(srv, second.body);
+    expect(s2.quality).toEqual({ requested: 'low', active: 'source' });
+    expect(s2.transcode).toBeNull();
   });
 
   it('bascule de source pendant une conversion : la conversion repart, jonction marquée', async () => {

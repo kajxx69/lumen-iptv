@@ -1,6 +1,12 @@
 import Hls, { type ErrorData } from 'hls.js';
 import { type RefObject, useEffect, useRef, useState } from 'react';
-import { ADAPTIVE_BUFFER, ADAPTIVE_BUFFER_LOW_LATENCY, AdaptiveBuffer } from './adaptive-buffer.js';
+import {
+  ADAPTIVE_BUFFER,
+  ADAPTIVE_BUFFER_LOW_LATENCY,
+  ADAPTIVE_BUFFER_UNSTABLE,
+  AdaptiveBuffer,
+} from './adaptive-buffer.js';
+import { dataUsage } from './data-usage.js';
 import { bufferedRanges, stallEscapeTarget } from './gap-jump.js';
 import { LIVE_DELAY, liveRate } from './live-delay.js';
 
@@ -69,6 +75,14 @@ export const HLS_CONFIG_LOW_LATENCY: Partial<Hls['config']> = {
   maxLiveSyncPlaybackRate: LOW_LATENCY_CATCH_UP_RATE,
 };
 
+/** Mesures du lecteur, lues par le contrôle automatique de la qualité. */
+export interface HlsTelemetry {
+  /** Débit estimé du réseau (bit/s), null s'il est encore inconnu. */
+  bandwidthBps(): number | null;
+  /** Une coupure de lecture depuis le dernier appel ? (remis à zéro à la lecture). */
+  takeStall(): boolean;
+}
+
 export interface HlsPlayerState {
   /** Image arrêtée faute de données depuis plus de SPINNER_DELAY_MS. */
   stalled: boolean;
@@ -76,6 +90,7 @@ export interface HlsPlayerState {
   needsGesture: boolean;
   /** Retard actuel sur le direct (s). */
   latencyS: number | null;
+  telemetry: HlsTelemetry;
 }
 
 const bufferAhead = (video: HTMLVideoElement): number => {
@@ -98,6 +113,8 @@ export function useHls(
   onSessionLost: () => void,
   onStats?: (stats: PlaybackStats) => void,
   lowLatency = false,
+  /** Réseau instable (2G/3G, économie de données) : tampon de départ renforcé. */
+  unstableNetwork = false,
 ): HlsPlayerState {
   const [stalled, setStalled] = useState(false);
   const [needsGesture, setNeedsGesture] = useState(false);
@@ -105,11 +122,27 @@ export function useHls(
   // Référence : le rappel peut changer à chaque rendu sans recréer le lecteur.
   const statsRef = useRef(onStats);
   statsRef.current = onStats;
+  // Mesures partagées avec le contrôle de qualité : mises à jour sans rendu.
+  const hlsRef = useRef<Hls | null>(null);
+  const stallRef = useRef(false);
+  const telemetry = useRef<HlsTelemetry>({
+    bandwidthBps: () => {
+      const estimate = hlsRef.current?.bandwidthEstimate;
+      return estimate === undefined || !Number.isFinite(estimate) || estimate <= 0 ? null : estimate;
+    },
+    takeStall: () => {
+      const stalled = stallRef.current;
+      stallRef.current = false;
+      return stalled;
+    },
+  }).current;
 
   useEffect(() => {
     const video = videoRef.current;
     if (video === null || streamUrl === null) return;
-    const buffer = new AdaptiveBuffer(lowLatency ? ADAPTIVE_BUFFER_LOW_LATENCY : ADAPTIVE_BUFFER);
+    const buffer = new AdaptiveBuffer(
+      lowLatency ? ADAPTIVE_BUFFER_LOW_LATENCY : unstableNetwork ? ADAPTIVE_BUFFER_UNSTABLE : ADAPTIVE_BUFFER,
+    );
     let started = false;
     let watchedMs = 0;
     let lastReport = Date.now();
@@ -141,6 +174,7 @@ export function useHls(
       }
       const instance = new Hls(lowLatency ? HLS_CONFIG_LOW_LATENCY : HLS_CONFIG);
       hls = instance;
+      hlsRef.current = instance;
       instance.on(Hls.Events.ERROR, (_event, data: ErrorData) => {
         if (!data.fatal) return;
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
@@ -165,8 +199,11 @@ export function useHls(
       });
       instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
         networkRetries = 0;
-        const loading = data.frag.stats.loading;
-        buffer.fragmentLoaded(Date.now(), (loading.end - loading.start) / 1000, data.frag.duration);
+        // LL-HLS : l'événement porte la partie chargée ; sinon le segment entier.
+        const loaded = data.part ?? data.frag;
+        const loading = loaded.stats.loading;
+        buffer.fragmentLoaded(Date.now(), (loading.end - loading.start) / 1000, loaded.duration);
+        dataUsage.add(loaded.stats.loaded);
       });
       instance.attachMedia(video);
       instance.loadSource(streamUrl);
@@ -175,7 +212,10 @@ export function useHls(
 
     const onWaiting = (): void => {
       // Une attente après le démarrage est une coupure vue par le spectateur.
-      if (started) buffer.stalled(Date.now());
+      if (started) {
+        buffer.stalled(Date.now());
+        stallRef.current = true;
+      }
       clearTimeout(spinnerTimer);
       spinnerTimer = setTimeout(() => {
         setStalled(true);
@@ -190,6 +230,14 @@ export function useHls(
     video.addEventListener('waiting', onWaiting);
     video.addEventListener('playing', onPlaying);
     video.addEventListener('timeupdate', onPlaying);
+    // Retour de la connexion après une coupure totale : reprise tout de suite, sans attendre la
+    // fin du délai de nouvel essai (PROJECT.md : « reprise automatique, sans intervention »).
+    const onOnline = (): void => {
+      clearTimeout(retryTimer);
+      networkRetries = 0;
+      hls?.startLoad();
+    };
+    window.addEventListener('online', onOnline);
 
     // Confort : retard sur le direct construit en douceur (lecture à 97 % tant qu'il manque),
     // vers une cible qui s'adapte à l'instabilité du réseau. Direct au plus près : hls.js
@@ -251,11 +299,13 @@ export function useHls(
       video.removeEventListener('waiting', onWaiting);
       video.removeEventListener('playing', onPlaying);
       video.removeEventListener('timeupdate', onPlaying);
+      window.removeEventListener('online', onOnline);
       hls?.destroy();
+      hlsRef.current = null;
       video.removeAttribute('src');
       video.load();
     };
-  }, [videoRef, streamUrl, onSessionLost, lowLatency]);
+  }, [videoRef, streamUrl, onSessionLost, lowLatency, unstableNetwork]);
 
-  return { stalled, needsGesture, latencyS };
+  return { stalled, needsGesture, latencyS, telemetry };
 }
