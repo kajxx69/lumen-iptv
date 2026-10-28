@@ -6,6 +6,7 @@ export {
   HealthTracker,
   type SerializedHealth,
   type SourceHealth,
+  diversifyHosts,
   rankSources,
   scoreHealth,
 } from './health.js';

@@ -2,6 +2,8 @@ import type { Writable } from 'node:stream';
 import Fastify, { type FastifyBaseLogger, type FastifyInstance } from 'fastify';
 import { type Logger, type LoggerOptions, pino } from 'pino';
 import { CatalogService } from './catalog/catalog-service.js';
+import { GridChecker } from './catalog/grid-checker.js';
+import { MergeService } from './catalog/merge-service.js';
 import type { ServerConfig } from './config.js';
 import { installAuth } from './http/auth.js';
 import { installErrorHandlers } from './http/errors.js';
@@ -19,6 +21,7 @@ import { RelayManager } from './relay/relay-manager.js';
 import { relayManagerOptions } from './relay/relay-options.js';
 import { registerAuthRoutes } from './routes/auth-routes.js';
 import { registerLibraryRoutes } from './routes/library-routes.js';
+import { registerMergeRoutes } from './routes/merge-routes.js';
 import { registerWebRoutes } from './routes/web-routes.js';
 import { LibraryStore } from './store/library-store.js';
 import { registerMetricsRoute } from './routes/metrics-route.js';
@@ -29,6 +32,7 @@ import { SecretBox } from './security/secret-box.js';
 import { AuthStore } from './store/auth-store.js';
 import { CatalogStore } from './store/catalog-store.js';
 import { openDatabase } from './store/database.js';
+import { MergeStore } from './store/merge-store.js';
 import { PortalStore } from './store/portal-store.js';
 
 export interface LumenServer {
@@ -85,6 +89,8 @@ export async function createServer(
   const catalogStore = new CatalogStore(db);
   const catalog = new CatalogService(catalogStore, registry, config, app.log);
   const portalHealth = new PortalHealth(registry, catalogStore);
+  const mergeStore = new MergeStore(db);
+  const merge = new MergeService(mergeStore, catalogStore);
   const metrics = new MetricsRegistry();
   registerProcessMetrics(metrics);
   const health = new HealthService(db);
@@ -105,7 +111,7 @@ export async function createServer(
     app.log,
   );
   const library = new LibraryStore(db);
-  const playback = new PlaybackService(registry, catalog, relays, library, health, config, app.log);
+  const playback = new PlaybackService(registry, catalog, relays, library, health, merge, config, app.log);
   const probes = config.probes
     ? new ProbeWorker(
         new ProbeScheduler(
@@ -125,6 +131,28 @@ export async function createServer(
       )
     : null;
   probes?.start();
+  const gridChecks = config.gridChecks
+    ? new GridChecker(
+        {
+          perHour: config.gridChecksPerHour,
+          startHour: config.probeCatalogStartHour,
+          endHour: config.probeCatalogEndHour,
+        },
+        {
+          merge,
+          store: mergeStore,
+          grid: async (ref, from, to) =>
+            (await registry.get(ref.portalId).provider.getEpg(ref.channelId, { from, to })).map((e) => ({
+              title: e.title,
+              start: e.start,
+              end: e.end,
+            })),
+          portalBusy: (portalId) => relays.portalBusy(portalId),
+          log: app.log,
+        },
+      )
+    : null;
+  gridChecks?.start();
 
   if (authStore.countUsers() === 0) {
     if (config.adminPassword === undefined) {
@@ -144,9 +172,10 @@ export async function createServer(
   installHttpHooks(app);
   const quota = installAuth(app, authStore, config);
   const loginFailures = registerAuthRoutes(app, authStore, config);
-  registerPortalRoutes(app, { store: portalStore, registry, catalog, config, health: portalHealth });
+  registerPortalRoutes(app, { store: portalStore, registry, catalog, config, health: portalHealth, merge });
+  registerMergeRoutes(app, { merge, store: mergeStore, registry });
   registerPlaybackRoutes(app, playback);
-  registerLibraryRoutes(app, { library, catalog });
+  registerLibraryRoutes(app, { library, catalog, merge });
   registerMetricsRoute(app, metrics, config);
   app.get('/api/health', () => Promise.resolve({ status: 'ok' }));
   await registerWebRoutes(app, config.webRoot);
@@ -164,6 +193,7 @@ export async function createServer(
     close: async () => {
       clearInterval(housekeeping);
       probes?.stop();
+      gridChecks?.stop();
       playback.closeAll();
       relays.closeAll();
       registry.closeAll();

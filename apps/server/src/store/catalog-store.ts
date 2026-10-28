@@ -16,6 +16,8 @@ export interface StoredChannel {
   archiveHours: number;
   censored: boolean;
   cmd: string;
+  /** Empreinte du nom (fusion multi-portails), calculée à la synchronisation. Absente des copies anciennes. */
+  fingerprint?: string;
 }
 
 export interface CatalogMeta {
@@ -62,6 +64,16 @@ export class CatalogStore {
       )
       .all(excludePortalId, epgId) as { portal_id: string; channel_id: string }[];
     return rows.map((r) => ({ portalId: r.portal_id, channelId: r.channel_id }));
+  }
+
+  /** Portails dont le catalogue est connu, dans l'ordre où ils ont été ajoutés. */
+  syncedPortals(): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT m.portal_id FROM catalog_meta m JOIN portals p ON p.id = m.portal_id ORDER BY p.created_at, p.id`,
+      )
+      .all() as { portal_id: string }[];
+    return rows.map((r) => r.portal_id);
   }
 
   /** Toutes les chaînes connues, dans l'ordre des portails : le balayage nocturne des sondes. */

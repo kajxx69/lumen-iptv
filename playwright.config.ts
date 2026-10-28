@@ -53,6 +53,8 @@ export default defineConfig({
         FAKE_PORTAL_SEED: '2',
         FAKE_PORTAL_NAME: 'Lumen Fake Portal B',
         FAKE_PORTAL_CHANNEL_COUNT: '50',
+        // Autre façon de nommer les mêmes chaînes (« Nova TV France 1080 ») : la fusion doit s'en sortir.
+        FAKE_PORTAL_NAMING_STYLE: 'plain',
       },
     },
     {
@@ -75,6 +77,8 @@ export default defineConfig({
         LUMEN_MAX_STREAMS_PER_USER: '60',
         LUMEN_MAX_STREAMS_TOTAL: '80',
         LUMEN_API_REQUESTS_PER_MINUTE: '20000',
+        // Confirmation nocturne par la grille EPG : hors des tests, qui peuvent tourner la nuit.
+        LUMEN_GRID_CHECKS: 'false',
       },
     },
   ],

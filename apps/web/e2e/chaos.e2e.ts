@@ -31,6 +31,12 @@ test.describe.configure({ timeout: 300_000 });
 interface Ctx {
   portalA: string;
   portalB: string;
+  /**
+   * Portails servis par le portail factice B : « Chaos B », mais aussi ceux qu'ont ajoutés
+   * les autres tests du même serveur. La fusion les réunit tous en sources d'une même
+   * chaîne ; basculer sur l'un d'eux, c'est échapper à la panne de A.
+   */
+  bSide: Set<string>;
   /** Chaînes de A qui existent aussi sur B (source de secours possible). */
   paired: string[];
   /** Chaînes de A sans équivalent sur B. */
@@ -78,12 +84,16 @@ async function setup(page: Page): Promise<Ctx> {
     ctx = {
       portalA,
       portalB,
+      bSide: new Set([portalB]),
       paired: usable.filter((c) => Number(c.id) <= SHARED_CHANNELS && c.epgId !== null).map((c) => c.id),
       alone: usable.filter((c) => Number(c.id) > SHARED_CHANNELS).map((c) => c.id),
     };
     // Le catalogue de B doit être connu du serveur pour qu'il y trouve des sources.
     await page.request.get(`/api/portals/${portalB}/channels`);
   }
+  const hostB = new URL(PORTAL_B_URL).host;
+  const portals = (await (await page.request.get('/api/portals')).json()) as { id: string; host: string }[];
+  ctx.bSide = new Set(portals.filter((p) => p.host === hostB).map((p) => p.id));
   await page.goto('/');
   await page.evaluate((id) => {
     localStorage.setItem('lumen.portal', id);
@@ -209,17 +219,17 @@ async function status(page: Page, sessionId: string): Promise<Status> {
   return (await (await page.request.get(`/api/playback/${sessionId}/status`)).json()) as Status;
 }
 
-/** Temps écoulé jusqu'à ce que le relais serve en direct depuis le portail `to` (ms), ou null. */
+/** Temps écoulé jusqu'à ce que le relais serve en direct depuis l'un des portails `to` (ms), ou null. */
 async function timeToSwitch(
   page: Page,
   sessionId: string,
-  to: string,
+  to: ReadonlySet<string>,
   startedAt: number,
   timeoutMs: number,
 ): Promise<number | null> {
   while (Date.now() - startedAt < timeoutMs) {
     const s = await status(page, sessionId);
-    if (s.activePortalId === to && s.state === 'live') return Date.now() - startedAt;
+    if (to.has(s.activePortalId) && s.state === 'live') return Date.now() - startedAt;
     await page.waitForTimeout(100);
   }
   return null;
@@ -259,12 +269,13 @@ test('2. coupure amont de 90 s : reprise automatique, aucune erreur si une sourc
   await record(page);
   const t0 = Date.now();
   await chaos(PORTAL_A_URL, 'drop', { durationMs: 90_000, channelId: channel });
-  const switchMs = await timeToSwitch(page, session, c.portalB, t0, 30_000);
+  const switchMs = await timeToSwitch(page, session, c.bSide, t0, 30_000);
   const o = await observe(page, 20_000);
   expect(switchMs).not.toBeNull();
   expect(o.errorSeen).toBe(false);
   expect(o.maxStallMs).toBeLessThan(INVISIBLE_STALL_MS);
-  expect(o.sources.at(-1)).toContain(NAME_B);
+  // L'indicateur nomme le portail de secours qui sert l'image.
+  expect(o.sources.at(-1)).toMatch(/secours : /);
 });
 
 test('3. token expiré en pleine lecture : renouvellement transparent, lecture continue', async ({ page }) => {
@@ -288,7 +299,7 @@ test('4. HTTP 403 soudain : nouveau create_link puis bascule en moins de 2 s', a
   const t0 = Date.now();
   // Coupe le flux en cours : la reconnexion tombe sur le 403.
   await chaos(PORTAL_A_URL, 'drop', { durationMs: 1, channelId: channel });
-  const switchMs = await timeToSwitch(page, session, c.portalB, t0, 15_000);
+  const switchMs = await timeToSwitch(page, session, c.bSide, t0, 15_000);
   console.log(`403 → bascule : ${String(switchMs)} ms`);
   const o = await observe(page, 10_000);
   expect(switchMs).not.toBeNull();
@@ -303,7 +314,7 @@ test('5. gel PTS de 8 s : détecté en moins de 2,5 s, bascule effectuée', asyn
   await record(page);
   const t0 = Date.now();
   await chaos(PORTAL_A_URL, 'freeze', { durationMs: 8000, channelId: channel });
-  const switchMs = await timeToSwitch(page, session, c.portalB, t0, 15_000);
+  const switchMs = await timeToSwitch(page, session, c.bSide, t0, 15_000);
   console.log(`gel → bascule : ${String(switchMs)} ms`);
   const o = await observe(page, 12_000);
   expect(switchMs).not.toBeNull();
@@ -319,7 +330,7 @@ test('6. écran noir de 15 s : détecté, source déclassée, bascule', async ({
   await record(page);
   const t0 = Date.now();
   await chaos(PORTAL_A_URL, 'blackscreen', { durationMs: 15_000, channelId: channel });
-  const switchMs = await timeToSwitch(page, session, c.portalB, t0, 20_000);
+  const switchMs = await timeToSwitch(page, session, c.bSide, t0, 20_000);
   console.log(`écran noir → bascule : ${String(switchMs)} ms`);
   await observe(page, 5000);
   expect(switchMs).not.toBeNull();
@@ -330,7 +341,7 @@ test('6. écran noir de 15 s : détecté, source déclassée, bascule', async ({
     sources: { portalId: string; score: number }[];
   };
   const scoreA = health.sources.find((s) => s.portalId === c.portalA)?.score ?? Infinity;
-  const scoreB = health.sources.find((s) => s.portalId === c.portalB)?.score ?? -Infinity;
+  const scoreB = Math.max(...health.sources.filter((s) => c.bSide.has(s.portalId)).map((s) => s.score));
   expect(scoreA).toBeLessThan(scoreB);
 });
 
@@ -343,7 +354,7 @@ test('7. débit divisé par 5 : descente de qualité ou de source, pas de rebuff
   // Débit nominal ≈ 1,3 Mbit/s (vidéo 1 200 + audio 96) : divisé par 5.
   await chaos(PORTAL_A_URL, 'throttle', { bitrateKbps: 260 });
   const o = await observe(page, 40_000);
-  expect((await status(page, session)).activePortalId).toBe(c.portalB);
+  expect(c.bSide.has((await status(page, session)).activePortalId)).toBe(true);
   expect(o.maxStallMs).toBeLessThan(INVISIBLE_STALL_MS);
   expect(o.spinnerSeen).toBe(false);
 });
@@ -355,7 +366,7 @@ test('8. source A morte, B saine : bascule en moins de 2 s, aucune coupure audio
   await record(page);
   const t0 = Date.now();
   await chaos(PORTAL_A_URL, 'drop', { durationMs: 120_000, channelId: channel });
-  const switchMs = await timeToSwitch(page, session, c.portalB, t0, 15_000);
+  const switchMs = await timeToSwitch(page, session, c.bSide, t0, 15_000);
   console.log(`A morte → bascule : ${String(switchMs)} ms`);
   const o = await observe(page, 15_000);
   expect(switchMs).not.toBeNull();

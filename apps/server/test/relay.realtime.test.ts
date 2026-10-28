@@ -1,4 +1,10 @@
-import type { ChannelHealthDto, PlaybackDto, PlaybackStatusDto, PortalDto } from '@lumen/protocol';
+import type {
+  ChannelHealthDto,
+  ChannelListDto,
+  PlaybackDto,
+  PlaybackStatusDto,
+  PortalDto,
+} from '@lumen/protocol';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ServerConfigInput } from '../src/config.js';
 import type { MediaSegment } from '../src/relay/hls-parser.js';
@@ -439,5 +445,26 @@ describe('moteur de résilience : sources trouvées seules, gel, écran noir, d�
     const ms = await timeToSource(d, pb, d.dtoB.id, t0, 15_000);
     console.log(`débit /5 → premier segment de B : ${ms} ms`);
     expect(ms).toBeLessThan(8000);
+  });
+
+  it('chaîne fusionnée (« Tous les portails ») : lue, et partagée avec la vue du portail', async () => {
+    const d = await dual();
+    const { onA, onB } = await paired(d, 4);
+    const all = await d.srv.admin.get<ChannelListDto>('/api/portals/all/channels');
+    const merged = all.body.channels.find((c) =>
+      c.sources?.some((s) => s.portalId === d.dtoA.id && s.channelId === onA),
+    );
+    expect(merged?.sources?.map((s) => s.channelId)).toEqual([onA, onB]);
+    const viaAll = await startPlayback(d.srv.admin, { portalId: 'all', channelId: merged?.id ?? '' });
+    await waitFor(
+      'lecture fusionnée',
+      async () => ((await status(d, viaAll)).state === 'live' ? true : undefined),
+      10_000,
+    );
+    // La même chaîne ouverte depuis la vue du portail A : même relais, aucune connexion de plus.
+    const viaA = await startPlayback(d.srv.admin, { portalId: d.dtoA.id, channelId: onA });
+    expect((await status(d, viaA)).state).toBe('live');
+    const upstream = (await activeStreams(d.a, onA)) + (await activeStreams(d.b, onB));
+    expect(upstream).toBe(1);
   });
 });

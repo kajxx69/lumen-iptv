@@ -1,5 +1,7 @@
 import { StalkerError } from '@lumen/core/stalker';
 import {
+  ALL_PORTALS_ID,
+  type ChannelRef,
   CreatePortalRequest,
   EPG_BATCH_MAX_CHANNELS,
   type EpgBatchDto,
@@ -12,6 +14,7 @@ import type { PortalHealth } from '../portals/portal-health.js';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import type { CatalogService } from '../catalog/catalog-service.js';
+import type { MergeService } from '../catalog/merge-service.js';
 import type { ServerConfig } from '../config.js';
 import { requireAdmin, requireUser } from '../http/auth.js';
 import { ApiError, fromStalker, notFound, parseOr400 } from '../http/errors.js';
@@ -58,15 +61,32 @@ interface PortalRouteDeps {
   catalog: CatalogService;
   config: ServerConfig;
   health: PortalHealth;
+  merge: MergeService;
 }
 
 export function registerPortalRoutes(
   app: FastifyInstance,
-  { store, registry, catalog, config, health }: PortalRouteDeps,
+  { store, registry, catalog, config, health, merge }: PortalRouteDeps,
 ): void {
+  /**
+   * Vue « Tous les portails » : chaque catalogue est d'abord garanti (premier chargement,
+   * rafraîchissement de fond). Un portail en panne ne prive pas les autres de la vue.
+   */
+  const ensureAllCatalogs = async (): Promise<void> => {
+    await Promise.allSettled(store.list().map((p) => catalog.channels(p.id)));
+  };
+
+  /** Chaîne fusionnée → la source qui porte son programme. */
+  const epgRef = (portalId: string, channelId: string): ChannelRef | null =>
+    portalId === ALL_PORTALS_ID ? merge.epgSource(channelId) : { portalId, channelId };
+
   app.get('/api/portals/:portalId/health', async (req): Promise<PortalHealthDto> => {
     requireUser(req);
-    return health.check(parseOr400(PortalParams, req.params).portalId);
+    const { portalId } = parseOr400(PortalParams, req.params);
+    // Vue fusionnée : chaque chaîne a ses sources ailleurs, aucun portail seul ne la prive.
+    if (portalId === ALL_PORTALS_ID)
+      return { portalId, reachable: true, checkedAt: Date.now(), syncedAt: null };
+    return health.check(portalId);
   });
 
   app.get('/api/portals', (req): PortalDto[] => {
@@ -117,13 +137,18 @@ export function registerPortalRoutes(
   app.get('/api/portals/:portalId/genres', async (req) => {
     requireUser(req);
     const { portalId } = parseOr400(PortalParams, req.params);
+    if (portalId === ALL_PORTALS_ID) {
+      await ensureAllCatalogs();
+      return merge.genres();
+    }
     return catalog.genres(portalId);
   });
 
   app.get('/api/portals/:portalId/channels', async (req, reply) => {
     requireUser(req);
     const { portalId } = parseOr400(PortalParams, req.params);
-    const list = await catalog.channels(portalId);
+    if (portalId === ALL_PORTALS_ID) await ensureAllCatalogs();
+    const list = portalId === ALL_PORTALS_ID ? merge.list() : await catalog.channels(portalId);
     const etag = `"${list.version}"`;
     // Revalidation systématique, mais un catalogue inchangé ne coûte qu'un 304.
     reply.header('ETag', etag).header('Cache-Control', 'private, no-cache');
@@ -163,8 +188,9 @@ export function registerPortalRoutes(
     if (to <= from || to - from > config.epgMaxWindowMs) {
       throw new ApiError(400, 'bad_request', 'fenêtre EPG invalide ou trop large');
     }
-    const entries = await epgCache.get(portalId, channelId, from, to);
-    return entries;
+    const ref = epgRef(portalId, channelId);
+    if (ref === null) throw notFound('chaîne');
+    return epgCache.get(ref.portalId, ref.channelId, from, to);
   });
 
   /**
@@ -178,9 +204,14 @@ export function registerPortalRoutes(
     if (to <= from || to - from > config.epgMaxWindowMs) {
       throw new ApiError(400, 'bad_request', 'fenêtre EPG invalide ou trop large');
     }
-    registry.get(portalId);
+    if (portalId !== ALL_PORTALS_ID) registry.get(portalId);
     const lists = await Promise.all(
-      channels.map((id) => epgCache.get(portalId, id, from, to).catch((): EpgEntryDto[] => [])),
+      channels.map((id) => {
+        const ref = epgRef(portalId, id);
+        return ref === null
+          ? Promise.resolve([])
+          : epgCache.get(ref.portalId, ref.channelId, from, to).catch((): EpgEntryDto[] => []);
+      }),
     );
     return Object.fromEntries(channels.map((id, i) => [id, lists[i] ?? []]));
   });

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { rankSources } from '@lumen/core/resilience';
+import { diversifyHosts, rankSources } from '@lumen/core/resilience';
 import {
+  ALL_PORTALS_ID,
   type ChannelHealthDto,
   type ChannelRef,
   MAX_FALLBACK_SOURCES,
@@ -11,6 +12,7 @@ import {
 } from '@lumen/protocol';
 import type { FastifyBaseLogger } from 'fastify';
 import type { CatalogService } from '../catalog/catalog-service.js';
+import type { MergeService } from '../catalog/merge-service.js';
 import type { ServerConfig } from '../config.js';
 import { ApiError, notFound } from '../http/errors.js';
 import type { PortalRegistry } from '../portals/registry.js';
@@ -55,6 +57,7 @@ export class PlaybackService {
     private readonly relays: RelayManager,
     private readonly library: LibraryStore,
     private readonly health: HealthService,
+    private readonly merge: MergeService,
     private readonly config: ServerConfig,
     private readonly log: FastifyBaseLogger,
   ) {
@@ -75,7 +78,7 @@ export class PlaybackService {
     // Toutes les sources sont vérifiées avant d'ouvrir quoi que ce soit en amont.
     const refs = await this.candidates(request);
     const sources = await Promise.all(refs.map((ref) => this.sourceFor(ref)));
-    const relay = this.relays.acquire(sourceId(request), sources);
+    const relay = this.relays.acquire(this.relayKey(request), sources);
     const id = randomUUID();
     // Identifiant de corrélation : suit cette lecture de bout en bout dans les journaux.
     const log = this.log.child({ cid: id, relay: relay.id });
@@ -93,7 +96,10 @@ export class PlaybackService {
       { portal: request.portalId, channel: request.channelId, fallbacks: request.fallbacks.length },
       'lecture démarrée',
     );
-    this.library.touchRecent(user.id, request.portalId, request.channelId, Date.now());
+    // Récent : toujours une chaîne réelle (la source choisie pour une chaîne fusionnée).
+    const watched = request.portalId === ALL_PORTALS_ID ? refs[0] : request;
+    if (watched !== undefined)
+      this.library.touchRecent(user.id, watched.portalId, watched.channelId, Date.now());
     return { sessionId: id, streamUrl: `/api/playback/${id}/index.m3u8`, format: 'hls' };
   }
 
@@ -105,29 +111,82 @@ export class PlaybackService {
   }
 
   /**
+   * Un relais par chaîne fusionnée : la vue « Tous les portails » et la vue d'un portail
+   * partagent la même connexion amont pour une même chaîne.
+   */
+  private relayKey(request: ChannelRef): string {
+    if (request.portalId === ALL_PORTALS_ID) return `g:${request.channelId}`;
+    const group = this.merge.enabled() ? this.merge.groupKeyOf(request) : null;
+    return group === null ? sourceId(request) : `g:${group}`;
+  }
+
+  /**
+   * La même chaîne ailleurs : les sources de sa chaîne fusionnée (corrections manuelles et
+   * refus de grille compris) ; fusion désactivée, le seul identifiant EPG, le plus sûr.
+   */
+  private async discovered(request: ChannelRef): Promise<ChannelRef[]> {
+    if (!this.merge.enabled()) return this.catalog.alternatives(request.portalId, request.channelId);
+    const group = this.merge.groupKeyOf(request);
+    return group === null ? [] : (this.merge.members(group) ?? []);
+  }
+
+  /**
    * Sources d'une chaîne, de la meilleure à la moins bonne : celle demandée, celles fournies
    * par le client, puis la même chaîne trouvée sur les autres portails. Classées par score
    * de santé, jamais par l'ordre de la liste (PROJECT.md §3) ; à égalité, celle demandée.
+   * Une chaîne fusionnée (« Tous les portails ») n'a que ses sources, toutes à égalité.
    */
-  private async candidates(request: PlaybackRequest): Promise<ChannelRef[]> {
-    const discovered = await this.catalog.alternatives(request.portalId, request.channelId);
-    const all = [request, ...request.fallbacks, ...discovered];
+  private async candidates(
+    request: PlaybackRequest,
+    limit = 1 + MAX_FALLBACK_SOURCES,
+  ): Promise<ChannelRef[]> {
+    if (request.portalId === ALL_PORTALS_ID) {
+      const members = this.merge.members(request.channelId);
+      if (members === null || members.length === 0) throw notFound('chaîne');
+      return this.rank(members, limit);
+    }
+    const all = [request, ...request.fallbacks, ...(await this.discovered(request))];
     const unique = all.filter(
       (ref, i) => all.findIndex((r) => r.portalId === ref.portalId && r.channelId === ref.channelId) === i,
     );
+    return this.rank(unique, limit);
+  }
+
+  /**
+   * Classées par score, en alternant les serveurs (une panne de serveur touche tous ses
+   * abonnements), puis bornées : les meilleures sources d'un grand groupe passent devant.
+   */
+  private rank(refs: readonly ChannelRef[], limit: number): ChannelRef[] {
     const ranked = rankSources(
-      unique.slice(0, 1 + MAX_FALLBACK_SOURCES).map((ref) => ({
+      refs.map((ref) => ({
         ref: { portalId: ref.portalId, channelId: ref.channelId },
         score: this.health.health(ref).score,
       })),
     );
-    return ranked.map((r) => r.ref);
+    return diversifyHosts(ranked, (r) => this.hostOf(r.ref.portalId))
+      .slice(0, limit)
+      .map((r) => r.ref);
+  }
+
+  private hostOf(portalId: string): string {
+    try {
+      return new URL(this.registry.get(portalId).origin).host;
+    } catch {
+      // Portail retiré entre-temps : considéré comme un serveur à part.
+      return portalId;
+    }
   }
 
   /** Santé de toutes les sources connues d'une chaîne (diagnostic, indicateur de santé). */
   async channelHealth(ref: ChannelRef): Promise<ChannelHealthDto> {
-    if ((await this.catalog.channel(ref.portalId, ref.channelId)) === null) throw notFound('chaîne');
-    const refs = await this.candidates({ ...ref, fallbacks: [] });
+    if (
+      ref.portalId !== ALL_PORTALS_ID &&
+      (await this.catalog.channel(ref.portalId, ref.channelId)) === null
+    ) {
+      throw notFound('chaîne');
+    }
+    // Diagnostic : toutes les sources, y compris celles que la lecture n'essaierait pas.
+    const refs = await this.candidates({ ...ref, fallbacks: [] }, Number.POSITIVE_INFINITY);
     return { sources: refs.map((r) => ({ ...r, ...this.health.health(r) })) };
   }
 

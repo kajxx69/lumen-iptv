@@ -70,6 +70,26 @@ const MIGRATIONS: readonly string[] = [
     PRIMARY KEY (portal_id, channel_id)
   );
   `,
+  // Fusion multi-portails : corrections manuelles, avis des grilles EPG, réglages d'installation.
+  `
+  CREATE TABLE merge_overrides (
+    portal_id TEXT NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL,
+    target TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (portal_id, channel_id)
+  );
+  CREATE TABLE merge_verdicts (
+    pair TEXT PRIMARY KEY,
+    verdict TEXT,
+    similarity REAL,
+    checked_at INTEGER NOT NULL
+  );
+  CREATE TABLE app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+  `,
 ];
 
 export function openDatabase(path: string): Db {

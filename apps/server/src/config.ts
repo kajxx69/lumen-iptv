@@ -110,10 +110,13 @@ export const ServerConfigSchema = z.object({
 
   /**
    * Gel : octets reçus mais horodatages figés depuis ce délai. PROJECT.md exige une détection
-   * en moins de 2,5 s : 2 s plus la période de vérification (250 ms) tiennent cette cible. C'est
-   * la panne que les lecteurs classiques ne voient jamais : la connexion vit, l'image est figée.
+   * en moins de 2,5 s ; 1,5 s laisse au lecteur, qui n'a que quelques secondes d'avance juste
+   * après le zapping, le temps de recevoir la source suivante. Une vidéo vivante fait avancer
+   * ses horodatages 25 fois par seconde : 1,5 s figée sous un flux d'octets n'est jamais normal,
+   * et une bascule de trop reste invisible. C'est la panne que les lecteurs classiques ne voient
+   * jamais : la connexion vit, l'image est figée.
    */
-  freezeDetectionMs: z.coerce.number().int().positive().default(2000),
+  freezeDetectionMs: z.coerce.number().int().positive().default(1500),
   /** Image noire ou silence prolongé au-delà de cette durée (PROJECT.md : 10 s). */
   contentFailureS: z.coerce.number().positive().default(10),
   /** Analyse d'image et de son par FFmpeg (un processus par segment, quelques % de CPU). */
@@ -135,6 +138,14 @@ export const ServerConfigSchema = z.object({
   probeCatalogEndHour: z.coerce.number().int().min(1).max(24).default(6),
   /** 600 sondes par heure (une toutes les 6 s) : invisible pour le portail, 5 000 chaînes en 3 nuits. */
   probeCatalogPerHour: z.coerce.number().int().positive().default(600),
+
+  /**
+   * Fusion multi-portails : les rapprochements (nom, identifiant EPG) sont confirmés par la
+   * grille de programmes sur 6 h, la nuit, dans la fenêtre des sondes du catalogue.
+   */
+  gridChecks: z.boolean().default(true),
+  /** 300 paires par heure (deux appels EPG chacune) : 5 000 chaînes en deux nuits environ. */
+  gridChecksPerHour: z.coerce.number().int().positive().default(300),
 
   /**
    * Jeton exigé par /metrics (en-tête `Authorization: Bearer …`). Sans jeton, /metrics est
@@ -212,6 +223,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
     probeCatalogStartHour: 'PROBE_CATALOG_START_HOUR',
     probeCatalogEndHour: 'PROBE_CATALOG_END_HOUR',
     probeCatalogPerHour: 'PROBE_CATALOG_PER_HOUR',
+    gridChecksPerHour: 'GRID_CHECKS_PER_HOUR',
     metricsToken: 'METRICS_TOKEN',
     catalogTtlMs: 'CATALOG_TTL_MS',
     epgCacheTtlMs: 'EPG_CACHE_TTL_MS',
@@ -229,6 +241,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
     ['trustProxy', 'TRUST_PROXY'],
     ['contentDetection', 'CONTENT_DETECTION'],
     ['probes', 'PROBES'],
+    ['gridChecks', 'GRID_CHECKS'],
   ] as const) {
     const v = env[`LUMEN_${key}`];
     if (v !== undefined && v !== '') input[field] = bool(v);

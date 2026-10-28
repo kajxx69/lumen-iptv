@@ -101,6 +101,20 @@ export type PortalHealthDto = z.infer<typeof PortalHealthDto>;
 export const GenreDto = z.object({ id: z.string(), title: z.string(), censored: z.boolean() });
 export type GenreDto = z.infer<typeof GenreDto>;
 
+/**
+ * Vue « Tous les portails » : un portail virtuel dont les chaînes sont les chaînes
+ * fusionnées (même chaîne sur plusieurs portails = une entrée, plusieurs sources).
+ */
+export const ALL_PORTALS_ID = 'all';
+
+/** Une source d'une chaîne fusionnée : la chaîne telle qu'elle existe sur un portail. */
+export const ChannelSourceDto = z.object({
+  portalId: z.string(),
+  channelId: z.string(),
+  name: z.string(),
+});
+export type ChannelSourceDto = z.infer<typeof ChannelSourceDto>;
+
 export const ChannelDto = z.object({
   id: z.string(),
   name: z.string(),
@@ -111,8 +125,39 @@ export const ChannelDto = z.object({
   epgId: z.string().nullable(),
   archiveHours: z.number(),
   censored: z.boolean(),
+  /** Vue « Tous les portails » seulement : les sources de la chaîne fusionnée. */
+  sources: z.array(ChannelSourceDto).optional(),
 });
 export type ChannelDto = z.infer<typeof ChannelDto>;
+
+/** Correction manuelle : la chaîne est mise à part (MERGE_SOLO) ou rattachée au groupe visé. */
+export const MERGE_SOLO_TARGET = 'solo';
+const MERGE_TARGET_MAX_LENGTH = 300;
+
+export const MergeOverrideDto = z.object({
+  portalId: z.string().min(1),
+  channelId: z.string().min(1),
+  target: z.string().min(1).max(MERGE_TARGET_MAX_LENGTH),
+});
+export type MergeOverrideDto = z.infer<typeof MergeOverrideDto>;
+
+export const MergeSettingsDto = z.object({
+  /** Fusion active : la vue « Tous les portails » existe et les secours suivent les regroupements. */
+  enabled: z.boolean(),
+  overrides: z.array(MergeOverrideDto),
+});
+export type MergeSettingsDto = z.infer<typeof MergeSettingsDto>;
+
+export const MergeSettingsRequest = z.object({ enabled: z.boolean() });
+export type MergeSettingsRequest = z.infer<typeof MergeSettingsRequest>;
+
+/** Pose (target) ou retire (null) la correction d'une chaîne. */
+export const MergeOverrideRequest = z.object({
+  portalId: z.string().min(1),
+  channelId: z.string().min(1),
+  target: z.string().min(1).max(MERGE_TARGET_MAX_LENGTH).nullable(),
+});
+export type MergeOverrideRequest = z.infer<typeof MergeOverrideRequest>;
 
 export const ChannelListDto = z.object({
   portalId: z.string(),

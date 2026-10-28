@@ -51,3 +51,19 @@ export function normalizeName(name: string): string {
   // Un nom fait seulement de marqueurs (« HD ») reste reconnaissable plutôt que vide.
   return (kept.length > 0 ? kept : words).join(' ');
 }
+
+/** Ponctuation autour d'un marqueur de qualité : « (1080p) », « [HD] ». */
+const MARKER_PUNCTUATION = /^[([{]+|[)\]}]+$/g;
+
+/**
+ * Nom présentable d'une chaîne fusionnée : la casse et l'écriture d'origine, sans préfixe
+ * pays ni marqueur de qualité (« FR | NOVA TV FHD » → « NOVA TV »).
+ */
+export function displayName(name: string): string {
+  const words = name.replace(COUNTRY_PREFIX, '').trim().split(/\s+/);
+  const kept = words.filter((w) => {
+    const bare = stripAccents(w.replace(MARKER_PUNCTUATION, '')).toLowerCase();
+    return !QUALITY_MARKERS.has(bare);
+  });
+  return (kept.length > 0 ? kept : words).join(' ');
+}

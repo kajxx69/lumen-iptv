@@ -202,3 +202,21 @@ export function rankSources<T extends { score: number }>(sources: readonly T[]):
     .sort((a, b) => b.s.score - a.s.score || a.i - b.i)
     .map(({ s }) => s);
 }
+
+/**
+ * Ordre de bascule qui alterne les serveurs : chaque source est suivie de la meilleure
+ * source d'un autre serveur, s'il en reste. Deux abonnements chez le même fournisseur
+ * tombent souvent ensemble ; basculer de l'un à l'autre, c'est perdre une bascule.
+ */
+export function diversifyHosts<T>(ranked: readonly T[], hostOf: (source: T) => string): T[] {
+  const rest = [...ranked];
+  const out: T[] = [];
+  while (rest.length > 0) {
+    const previous = out.at(-1);
+    const host = previous === undefined ? null : hostOf(previous);
+    const index = rest.findIndex((s) => hostOf(s) !== host);
+    const [next] = rest.splice(index < 0 ? 0 : index, 1);
+    if (next !== undefined) out.push(next);
+  }
+  return out;
+}

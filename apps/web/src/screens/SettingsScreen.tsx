@@ -1,10 +1,11 @@
 import type { DeviceModel } from '@lumen/protocol';
 import { type FormEvent, useState } from 'react';
 import { ApiError } from '../api/client.js';
-import { useAddPortal, useLogout, useMe, useRemovePortal } from '../api/queries.js';
+import { useAddPortal, useLogout, useMe, usePortals, useRemovePortal } from '../api/queries.js';
+import { MergeSettings } from '../components/MergeSettings.js';
 import { usePrefs } from '../state/prefs.js';
 import { navigate } from '../state/router.js';
-import { useCurrentPortal } from '../state/use-current-portal.js';
+import { ALL_PORTALS, useCurrentPortal } from '../state/use-current-portal.js';
 
 const DEVICES: DeviceModel[] = ['MAG250', 'MAG254', 'MAG322'];
 
@@ -114,6 +115,7 @@ export function SettingsScreen() {
   const setPortal = usePrefs((s) => s.setPortal);
   const remove = useRemovePortal();
   const admin = me.data?.role === 'admin';
+  const realPortals = usePortals().data ?? [];
 
   return (
     <div className="form-page screen">
@@ -126,7 +128,9 @@ export function SettingsScreen() {
             <div className="card-body">
               <strong>{p.name}</strong>
               <small>
-                {p.host} · {p.macMasked} · {p.device}
+                {p.id === ALL_PORTALS.id
+                  ? 'chaque chaîne une seule fois, avec ses sources de secours'
+                  : `${p.host} · ${p.macMasked} · ${p.device}`}
               </small>
             </div>
             <button
@@ -141,7 +145,7 @@ export function SettingsScreen() {
             >
               {p.id === current?.id ? 'Affiché' : 'Afficher'}
             </button>
-            {admin && (
+            {admin && p.id !== ALL_PORTALS.id && (
               <button
                 type="button"
                 className="button"
@@ -157,6 +161,7 @@ export function SettingsScreen() {
         ))}
       </div>
       {admin && <AddPortalForm />}
+      {realPortals.length > 1 && <MergeSettings admin={admin} />}
       <h2>Session</h2>
       <p className="programme-now">Connecté en tant que {me.data?.username ?? '…'}.</p>
       <button

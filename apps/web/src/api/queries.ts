@@ -3,6 +3,8 @@ import {
   FavoriteDto,
   type LoginRequest,
   MeDto,
+  type MergeOverrideRequest,
+  MergeSettingsDto,
   PortalDto,
   PortalHealthDto,
   RecentDto,
@@ -145,14 +147,28 @@ export const favoriteKey = (portalId: string, channelId: string): string => `${p
 export function useToggleFavorite() {
   const client = useQueryClient();
   return useMutation({
-    mutationFn: ({ portalId, channelId, on }: { portalId: string; channelId: string; on: boolean }) =>
+    mutationFn: ({
+      portalId,
+      channelId,
+      on,
+    }: {
+      portalId: string;
+      channelId: string;
+      on: boolean;
+      /** Chaîne fusionnée : ses sources, retirées elles aussi de l'affichage dès le clic. */
+      sources?: readonly { portalId: string; channelId: string }[];
+    }) =>
       request(`/api/favorites/${encodeURIComponent(portalId)}/${encodeURIComponent(channelId)}`, {
         method: on ? 'PUT' : 'DELETE',
       }),
-    onMutate: async ({ portalId, channelId, on }) => {
+    onMutate: async ({ portalId, channelId, on, sources = [] }) => {
       await client.cancelQueries({ queryKey: favoritesKey });
       const previous = client.getQueryData<FavoriteDto[]>(favoritesKey);
-      const rest = (previous ?? []).filter((f) => !(f.portalId === portalId && f.channelId === channelId));
+      const matches = (f: FavoriteDto): boolean =>
+        [{ portalId, channelId }, ...sources].some(
+          (r) => r.portalId === f.portalId && r.channelId === f.channelId,
+        );
+      const rest = (previous ?? []).filter((f) => !matches(f));
       client.setQueryData<FavoriteDto[]>(
         favoritesKey,
         on ? [...rest, { portalId, channelId, addedAt: Date.now() }] : rest,
@@ -193,3 +209,30 @@ export function useRecents(enabled = true) {
     enabled,
   });
 }
+
+const mergeKey = ['merge'];
+
+/** Réglages de la fusion des portails (d'installation) : active ou non, corrections manuelles. */
+export function useMergeSettings(enabled = true) {
+  return useQuery({
+    queryKey: mergeKey,
+    queryFn: () => requestJson(MergeSettingsDto, '/api/catalog/merge'),
+    enabled,
+  });
+}
+
+/** Après un changement : réglages relus, catalogue fusionné revalidé (nouvelle version). */
+function useMergeMutation<T>(path: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (body: T) => requestJson(MergeSettingsDto, path, { method: 'PUT', body }),
+    onSuccess: async (settings) => {
+      client.setQueryData(mergeKey, settings);
+      await client.invalidateQueries({ queryKey: ['catalog'] });
+    },
+  });
+}
+
+export const useSetMergeEnabled = () => useMergeMutation<{ enabled: boolean }>('/api/catalog/merge');
+export const useSetMergeOverride = () =>
+  useMergeMutation<MergeOverrideRequest>('/api/catalog/merge/overrides');

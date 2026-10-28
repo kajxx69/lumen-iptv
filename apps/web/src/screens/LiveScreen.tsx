@@ -22,9 +22,19 @@ export function LiveScreen({ genre }: { genre: string | null }) {
   // La saisie reste fluide : la liste suit la frappe sans la bloquer.
   const deferredQuery = useDeferredValue(query);
 
+  // Favoris de ce catalogue : une chaîne fusionnée l'est si l'une de ses sources l'est.
+  const favoriteChannels = useMemo(
+    (): ChannelDto[] =>
+      catalog === null
+        ? []
+        : (favorites.data ?? [])
+            .map((f) => catalog.resolve(f))
+            .filter((c): c is ChannelDto => c !== undefined),
+    [catalog, favorites.data],
+  );
   const favoriteSet = useMemo(
-    () => new Set((favorites.data ?? []).map((f) => favoriteKey(f.portalId, f.channelId))),
-    [favorites.data],
+    () => new Set(favoriteChannels.map((c) => favoriteKey(portalId ?? '', c.id))),
+    [favoriteChannels, portalId],
   );
 
   const counts = useMemo(() => {
@@ -41,14 +51,9 @@ export function LiveScreen({ genre }: { genre: string | null }) {
         .map((id) => catalog.byId.get(id))
         .filter((c): c is ChannelDto => c !== undefined);
     }
-    if (genre === FAVORITES_GENRE) {
-      return (favorites.data ?? [])
-        .filter((f) => f.portalId === portalId)
-        .map((f) => catalog.byId.get(f.channelId))
-        .filter((c): c is ChannelDto => c !== undefined);
-    }
+    if (genre === FAVORITES_GENRE) return [...new Set(favoriteChannels)];
     return genre === ALL_GENRES ? catalog.channels : catalog.channels.filter((c) => c.genreId === genre);
-  }, [catalog, deferredQuery, genre, favorites.data, portalId]);
+  }, [catalog, deferredQuery, genre, favoriteChannels]);
 
   if (!portalsLoading && portal === null) return <NoPortal />;
   if (catalog === null) {
@@ -113,7 +118,7 @@ export function LiveScreen({ genre }: { genre: string | null }) {
             if (portalId !== null) navigate({ name: 'watch', portalId, channelId: c.id });
           }}
           onToggleFavorite={(c, on) => {
-            if (portalId !== null) toggle.mutate({ portalId, channelId: c.id, on });
+            if (portalId !== null) toggle.mutate({ portalId, channelId: c.id, on, sources: c.sources ?? [] });
           }}
         />
       </section>

@@ -1,4 +1,11 @@
-import { type ChannelDto, ChannelListDto, type GenreDto, GenreDto as GenreSchema } from '@lumen/protocol';
+import {
+  ALL_PORTALS_ID,
+  type ChannelDto,
+  ChannelListDto,
+  type ChannelRef,
+  type GenreDto,
+  GenreDto as GenreSchema,
+} from '@lumen/protocol';
 import { useQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
 import { z } from 'zod';
@@ -45,10 +52,23 @@ function built(source: CachedCatalog): Omit<Catalog, 'fromCache'> {
   const hit = builtCatalogs.get(key);
   if (hit !== undefined) return hit;
   const channels = source.channels.filter((c) => !c.censored);
+  const byId = new Map(channels.map((c) => [c.id, c]));
+  // Vue « Tous les portails » : chaque source mène à sa chaîne fusionnée.
+  const bySource = new Map<string, ChannelDto>();
+  if (source.portalId === ALL_PORTALS_ID) {
+    for (const c of channels)
+      for (const s of c.sources ?? []) bySource.set(`${s.portalId}:${s.channelId}`, c);
+  }
   const result = {
     channels,
     genres: source.genres.filter((g) => !g.censored),
-    byId: new Map(channels.map((c) => [c.id, c])),
+    byId,
+    resolve: (ref: ChannelRef): ChannelDto | undefined =>
+      ref.portalId === source.portalId
+        ? byId.get(ref.channelId)
+        : source.portalId === ALL_PORTALS_ID
+          ? bySource.get(`${ref.portalId}:${ref.channelId}`)
+          : undefined,
     search: new ChannelSearch(channels.map((c) => ({ key: c.id, name: c.name, number: c.number }))),
     syncedAt: source.syncedAt,
   };
@@ -61,6 +81,11 @@ export interface Catalog {
   channels: ChannelDto[];
   genres: GenreDto[];
   byId: Map<string, ChannelDto>;
+  /**
+   * Chaîne de ce catalogue désignée par une chaîne de portail (favori, récent) : elle-même
+   * dans la vue d'un portail, sa chaîne fusionnée dans la vue « Tous les portails ».
+   */
+  resolve: (ref: ChannelRef) => ChannelDto | undefined;
   search: ChannelSearch;
   /** Copie locale affichée faute de réseau (ou en attendant la revalidation). */
   fromCache: boolean;

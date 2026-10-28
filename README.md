@@ -2,10 +2,11 @@
 
 Lecteur IPTV (Stalker Portal) centré sur la résilience. Voir [PROJECT.md](PROJECT.md) pour la spécification.
 
-**État : phase 5** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
+**État : phase 6** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
 comptes et chiffrement des portails (2), relais avec tampon glissant et bascule de source (3),
 client web : catalogue virtualisé, lecteur, guide des programmes, favoris (4), moteur de
-résilience : détection de panne à trois niveaux, score de santé, sondes, tampon adaptatif (5).
+résilience : détection de panne à trois niveaux, score de santé, sondes, tampon adaptatif (5),
+agrégation multi-portails et dédoublonnage (6).
 
 ## Prérequis
 
@@ -162,16 +163,16 @@ Un lecteur ne peut pas inventer des images qui n'arrivent pas. Lumen masque les 
 absorbant (tampon), en reprenant plus vite que le tampon ne se vide, et en basculant vers une
 autre source — en choisissant celle-ci d'après ce qu'il sait déjà d'elle.
 
-**Sources de secours trouvées seules.** Au lancement d'une chaîne, le serveur cherche la même
-chaîne sur les autres portails enregistrés, par identifiant EPG (le signal le plus fiable entre
-deux portails). Le client n'a rien à fournir. La fusion complète des catalogues arrive en phase 6.
+**Sources de secours trouvées seules.** Au lancement d'une chaîne, le serveur prend ses autres
+sources dans la chaîne fusionnée (voir « La fusion des portails ») ; fusion désactivée, il s'en
+tient au seul identifiant EPG. Le client n'a rien à fournir.
 
 **Détection de panne à trois niveaux** (dans le relais, pour toutes les sources) :
 
 | Niveau      | Signal                                                         | Seuil          | Réaction                           |
 | ----------- | -------------------------------------------------------------- | -------------- | ---------------------------------- |
 | Réseau      | socket fermée, délai, HTTP 4xx/5xx, plus aucun segment         | immédiat / 8 s | nouveau lien, puis source suivante |
-| Progression | octets reçus mais horodatages vidéo figés                      | 2 s            | source suivante                    |
+| Progression | octets reçus mais horodatages vidéo figés                      | 1,5 s          | source suivante                    |
 | Contenu     | image noire ou silence (FFmpeg `blackdetect`, `silencedetect`) | 10 s           | source suivante, source déclassée  |
 | Débit       | la source livre moins de 40 % du débit du flux sur 4 s         | 4 s            | source suivante (s'il y en a une)  |
 
@@ -210,6 +211,36 @@ Variables : `LUMEN_RELAY_FAST_START_S`, `LUMEN_RELAY_FIRST_SEGMENT_TARGET_S`,
 `LUMEN_FFMPEG_PATH`, `LUMEN_PROBES`, `LUMEN_PROBE_FAVORITES_INTERVAL_MS`,
 `LUMEN_PROBE_CATALOG_START_HOUR` / `_END_HOUR` / `_PER_HOUR` (voir `apps/server/src/config.ts`).
 L'analyse d'image exige FFmpeg sur le serveur ; sans lui, elle se désactive avec un avertissement.
+
+## La fusion des portails
+
+Avec plusieurs portails, la même chaîne y paraît sous des noms différents (`FR | CANAL+ FHD`,
+`CANAL PLUS France`, `Canal + HD`). La vue **« Tous les portails »**, proposée par défaut dès
+deux portails, en montre une seule entrée portant toutes ses sources ; le lecteur choisit la
+meilleure par score de santé et bascule sur les autres en cas de panne. Une chaîne ouverte depuis
+la vue fusionnée ou depuis la vue d'un portail partage la même connexion amont.
+
+Pipeline (`packages/core/catalog`, pur et testé) :
+
+1. **Normalisation** : préfixes et suffixes pays, marqueurs de qualité, accents, casse ; « Plus » et
+   « + » réunis.
+2. **Empreinte** : nom normalisé et identifiant EPG proposent les rapprochements.
+3. **Confirmation par la grille** : chaque rapprochement entre deux portails est vérifié la nuit
+   (fenêtre des sondes, 300 paires par heure, jamais sur un portail occupé) en comparant 6 h de
+   programmes. Grilles différentes : le rapprochement est défait. Avis revérifié chaque semaine.
+4. **Fusion** : une entrée par chaîne, ses sources, un nom lisible, des genres réunis par
+   intitulé. 100 000 entrées fusionnées en moins d'une seconde (empreintes calculées à la
+   synchronisation).
+
+**Corrections** (Réglages, administrateur) : chercher une chaîne, séparer une source ou la
+déplacer vers la bonne chaîne ; chaque correction s'annule. Elles valent pour toute
+l'installation et l'emportent sur l'automatisme. La fusion se désactive d'un bouton.
+
+Favoris et récents désignent toujours une chaîne réelle (portail, chaîne) : une chaîne fusionnée
+est favorite si l'une de ses sources l'est, et passer d'une vue à l'autre ne perd rien.
+
+Variables : `LUMEN_GRID_CHECKS`, `LUMEN_GRID_CHECKS_PER_HOUR` (fenêtre :
+`LUMEN_PROBE_CATALOG_START_HOUR` / `_END_HOUR`).
 
 ## Arborescence
 
@@ -349,7 +380,7 @@ alternative n'existe, la lecture s'arrête. Aucun tampon ne fabrique des images 
 
 Le tampon du relais ne protège que la part dont le lecteur est en retard sur le direct : un
 lecteur collé au direct n'a que ses propres secondes d'avance. Le placement du lecteur (retard
-visé ≈ 20 s, construit après un démarrage court) est l'objet du tampon client adaptatif (phase 6).
+visé ≈ 20 s, construit après un démarrage court) est l'objet du tampon client adaptatif.
 
 À la jonction entre deux sources, l'image peut sauter de quelques secondes : deux serveurs
 amont ne sont pas synchronisés à l'image près, et la plupart des portails ne donnent aucun

@@ -1,4 +1,4 @@
-import type { ChannelDto, PlaybackStatusDto } from '@lumen/protocol';
+import { ALL_PORTALS_ID, type ChannelDto, type PlaybackStatusDto } from '@lumen/protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { favoriteKey, useFavorites, usePortals, useToggleFavorite } from '../api/queries.js';
 import { useCatalog } from '../catalog/use-catalog.js';
@@ -18,6 +18,7 @@ const OVERLAY_HIDE_MS = 4000;
 /**
  * Indicateur de source et de santé. Quand l'image vient d'un autre portail que celui
  * choisi (bascule automatique), il le nomme : le spectateur comprend ce qui se passe.
+ * Dans la vue « Tous les portails », aucun portail n'est choisi : il nomme celui qui sert.
  */
 function sourceLabel(
   status: PlaybackStatusDto | null,
@@ -25,12 +26,17 @@ function sourceLabel(
   portalName: (id: string) => string,
 ): { text: string; warn: boolean } {
   if (status === null) return { text: 'Connexion…', warn: true };
-  const elsewhere = status.activePortalId !== requestedPortalId;
-  const source = elsewhere
-    ? ` · secours : ${portalName(status.activePortalId)}`
-    : status.sourceCount > 1
+  const merged = requestedPortalId === ALL_PORTALS_ID;
+  const elsewhere = !merged && status.activePortalId !== requestedPortalId;
+  const ready =
+    status.sourceCount > 1
       ? ` · ${status.sourceCount - 1} secours prêt${status.sourceCount > 2 ? 's' : ''}`
       : '';
+  const source = elsewhere
+    ? ` · secours : ${portalName(status.activePortalId)}`
+    : merged
+      ? ` · ${portalName(status.activePortalId)}${ready}`
+      : ready;
   if (status.state === 'recovering') return { text: `Reprise en cours${source}`, warn: true };
   if (status.state === 'starting') return { text: `Démarrage${source}`, warn: true };
   return { text: `En direct${source}`, warn: elsewhere };
@@ -73,8 +79,11 @@ export function WatchScreen({ portalId, channelId }: { portalId: string; channel
   const favorites = useFavorites();
   const portals = usePortals();
   const toggle = useToggleFavorite();
-  const favorite = (favorites.data ?? []).some(
-    (f) => favoriteKey(f.portalId, f.channelId) === favoriteKey(portalId, channelId),
+  // Chaîne fusionnée : favorite si l'une de ses sources l'est.
+  const favorite = (favorites.data ?? []).some((f) =>
+    catalog === null
+      ? favoriteKey(f.portalId, f.channelId) === favoriteKey(portalId, channelId)
+      : catalog.resolve(f)?.id === channelId,
   );
 
   const [overlay, setOverlay] = useState(true);
@@ -233,7 +242,7 @@ export function WatchScreen({ portalId, channelId }: { portalId: string; channel
             data-nav-default
             aria-pressed={favorite}
             onClick={() => {
-              toggle.mutate({ portalId, channelId, on: !favorite });
+              toggle.mutate({ portalId, channelId, on: !favorite, sources: channel?.sources ?? [] });
             }}
           >
             {favorite ? '★ Favori' : '☆ Ajouter aux favoris'}

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { fingerprintName } from '@lumen/core/catalog';
 import type { ChannelDto, ChannelListDto, GenreDto } from '@lumen/protocol';
 import type { FastifyBaseLogger } from 'fastify';
 import type { ServerConfig } from '../config.js';
@@ -79,6 +80,7 @@ export class CatalogService {
         archiveHours: c.archive ? c.archiveHours : 0,
         censored: c.censored,
         cmd: c.cmd,
+        fingerprint: fingerprintName(c.name),
       });
     }
     const version = createHash('sha256')

@@ -34,11 +34,10 @@ export function HomeScreen() {
   if (!loading && portal === null) return <NoPortal />;
   if (catalog === null || portalId === null) return <div className="empty">Chargement…</div>;
 
-  const resolve = (refs: readonly { portalId: string; channelId: string }[]): ChannelDto[] =>
-    refs
-      .filter((r) => r.portalId === portalId)
-      .map((r) => catalog.byId.get(r.channelId))
-      .filter((c): c is ChannelDto => c !== undefined);
+  // Une chaîne fusionnée n'apparaît qu'une fois, quelle que soit la source retenue.
+  const resolve = (refs: readonly { portalId: string; channelId: string }[]): ChannelDto[] => [
+    ...new Set(refs.map((r) => catalog.resolve(r)).filter((c): c is ChannelDto => c !== undefined)),
+  ];
   const recentChannels = resolve(recents.data ?? []);
   const favoriteChannels = resolve(favorites.data ?? []);
   const last = recentChannels[0];
