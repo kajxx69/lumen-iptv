@@ -35,6 +35,22 @@ export interface SegmenterOptions {
   timestampJumpS: number;
   /** En deçà, un segment interrompu par une rupture est jeté plutôt que publié. */
   minFlushDurationS: number;
+  /**
+   * Parties de segment (LL-HLS) : durée maximale d'une partie, annoncée en PART-TARGET. Les
+   * lecteurs « direct au plus près » reçoivent le flux par parties, sans attendre la fin du
+   * segment. 0 : pas de parties.
+   */
+  partTargetS: number;
+}
+
+/** Une partie de segment : PAT et PMT en tête, décodable à la suite de la précédente. */
+export interface PartDraft {
+  data: Buffer;
+  durationS: number;
+  /** Commence par une image clé : un lecteur peut y démarrer. */
+  independent: boolean;
+  /** Appartient au premier segment d'une nouvelle source : la jonction précède la partie. */
+  discontinuity: boolean;
 }
 
 export interface SegmentDraft {
@@ -44,6 +60,8 @@ export interface SegmentDraft {
   independent: boolean;
   /** Premier segment après une rupture : nouvelle connexion ou saut d'horodatage. */
   discontinuity: boolean;
+  /** Ses parties (LL-HLS), déjà publiées une à une ; vide sans parties. */
+  parts: PartDraft[];
 }
 
 export interface SegmenterStats {
@@ -92,10 +110,32 @@ export class TsSegmenter {
   /** Horodatage de la première image clé de la source en cours (début du démarrage rapide). */
   private sourceStartTs: number | null = null;
 
+  // Partie en cours (LL-HLS) : paquets [partStart, …) du segment en cours.
+  private partStart = 0;
+  private partStartTs: number | null = null;
+  private partIndependent = true;
+  private parts: PartDraft[] = [];
+  /** Compteurs propres aux tables des parties : continus pour qui lit les parties. */
+  private partPatCc = 0;
+  private partPmtCc = 0;
+
   constructor(
     private readonly options: SegmenterOptions,
     private readonly emit: (segment: SegmentDraft) => void,
+    private readonly emitPart: (part: PartDraft) => void = () => undefined,
   ) {}
+
+  /** Flux du programme en cours (codecs) : décide d'un éventuel transcodage. */
+  get programStreams(): ProgramStreams | null {
+    return this.streams;
+  }
+
+  /** Le segment en cours, pas encore publié (PAT et PMT en tête) ; null s'il n'y en a pas. */
+  pendingData(): Buffer | null {
+    if (this.startTs === null || this.pat === null || this.pmt === null || this.packets.length === 0)
+      return null;
+    return withTables(this.pat, this.pmt, this.packets);
+  }
 
   push(chunk: Uint8Array): void {
     const buf = this.carry.length === 0 ? chunk : concat(this.carry, chunk);
@@ -217,6 +257,7 @@ export class TsSegmenter {
     // Avant la première image clé : ce qui a été reçu est indécodable.
     if (this.startTs === null) this.packets = [];
     const index = this.packets.length;
+    this.maybeEndPart(index, ts);
 
     // Audio seul (radio) : chaque trame est un point d'entrée.
     const isVideo = packetPid(pkt, 0) === streams.videoPid;
@@ -265,8 +306,11 @@ export class TsSegmenter {
       this.startTs = ts;
       this.startIndependent = true;
       this.sourceStartTs ??= ts;
+      this.startPart(0, ts, true);
       return;
     }
+    // Image clé reconnue après coup (analyse NAL) : la partie qu'elle ouvre est autonome.
+    if (index === this.partStart) this.partIndependent = true;
     const target =
       this.segmentsSinceBreak === 0 || this.inFastStart(ts)
         ? this.options.firstTargetDurationS
@@ -277,20 +321,65 @@ export class TsSegmenter {
   /** Publie les paquets [0, index) ; le segment suivant commence à `ts`. */
   private cut(index: number, ts: number, nextIndependent: boolean): void {
     if (this.startTs === null) return;
+    if (this.partStartTs !== null) this.endPart(index, timestampDelta(this.partStartTs, ts));
     this.publish(this.packets.slice(0, index), timestampDelta(this.startTs, ts));
     this.packets = this.packets.slice(index);
     this.startTs = ts;
     this.startIndependent = nextIndependent;
+    this.startPart(0, ts, nextIndependent);
+  }
+
+  private startPart(index: number, ts: number, independent: boolean): void {
+    this.partStart = index;
+    this.partStartTs = ts;
+    this.partIndependent = independent;
+  }
+
+  /** Fin de partie à l'image `ts` si une image de plus dépasserait la cible. */
+  private maybeEndPart(index: number, ts: number): void {
+    if (this.options.partTargetS <= 0 || this.startTs === null || this.partStartTs === null) return;
+    const ticks = timestampDelta(this.partStartTs, ts);
+    if (ticks + this.frameTicks <= this.options.partTargetS * MPEG_CLOCK_HZ) return;
+    this.endPart(index, ticks);
+    this.startPart(index, ts, false);
+  }
+
+  private endPart(index: number, ticks: number): void {
+    if (this.options.partTargetS <= 0 || index <= this.partStart || this.pat === null || this.pmt === null) {
+      return;
+    }
+    const pat = Uint8Array.from(this.pat);
+    const pmt = Uint8Array.from(this.pmt);
+    setContinuityCounter(pat, 0, this.partPatCc);
+    setContinuityCounter(pmt, 0, this.partPmtCc);
+    this.partPatCc = (this.partPatCc + 1) & 0x0f;
+    this.partPmtCc = (this.partPmtCc + 1) & 0x0f;
+    const part: PartDraft = {
+      data: withTables(pat, pmt, this.packets.slice(this.partStart, index)),
+      durationS: ticks / MPEG_CLOCK_HZ,
+      independent: this.partIndependent,
+      discontinuity: this.nextDiscontinuity,
+    };
+    this.parts.push(part);
+    this.emitPart(part);
   }
 
   private flushPartial(): void {
     if (this.startTs !== null && this.lastTs !== null) {
       const ticks = timestampDelta(this.startTs, this.lastTs) + this.frameTicks;
-      if (ticks >= this.options.minFlushDurationS * MPEG_CLOCK_HZ) this.publish(this.packets, ticks);
+      if (this.partStartTs !== null) {
+        this.endPart(this.packets.length, timestampDelta(this.partStartTs, this.lastTs) + this.frameTicks);
+      }
+      // Des parties déjà annoncées aux lecteurs : leur segment doit exister, même court.
+      if (ticks >= this.options.minFlushDurationS * MPEG_CLOCK_HZ || this.parts.length > 0) {
+        this.publish(this.packets, ticks);
+      }
     }
     this.packets = [];
     this.startTs = null;
     this.pending = null;
+    this.parts = [];
+    this.partStartTs = null;
   }
 
   private publish(packets: Uint8Array[], ticks: number): void {
@@ -303,21 +392,28 @@ export class TsSegmenter {
     setContinuityCounter(pmt, 0, this.pmtCc);
     this.patCc = (this.patCc + 1) & 0x0f;
     this.pmtCc = (this.pmtCc + 1) & 0x0f;
-    const data = Buffer.allocUnsafe((packets.length + 2) * TS_PACKET_SIZE);
-    data.set(pat, 0);
-    data.set(pmt, TS_PACKET_SIZE);
-    packets.forEach((pkt, i) => {
-      data.set(pkt, (i + 2) * TS_PACKET_SIZE);
-    });
+    const parts = this.parts;
+    this.parts = [];
     this.emit({
-      data,
+      data: withTables(pat, pmt, packets),
       durationS: ticks / MPEG_CLOCK_HZ,
       independent: this.startIndependent,
       discontinuity: this.nextDiscontinuity,
+      parts,
     });
     this.nextDiscontinuity = false;
     this.segmentsSinceBreak++;
   }
+}
+
+function withTables(pat: Uint8Array, pmt: Uint8Array, packets: readonly Uint8Array[]): Buffer {
+  const data = Buffer.allocUnsafe((packets.length + 2) * TS_PACKET_SIZE);
+  data.set(pat, 0);
+  data.set(pmt, TS_PACKET_SIZE);
+  packets.forEach((pkt, i) => {
+    data.set(pkt, (i + 2) * TS_PACKET_SIZE);
+  });
+  return data;
 }
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {

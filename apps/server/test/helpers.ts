@@ -111,6 +111,8 @@ export async function startServer(overrides: Partial<ServerConfigInput> = {}): P
     // pour que les comptes de connexions amont ne dépendent que du test.
     probes: false,
     gridChecks: false,
+    // Pas d'essai d'encodeurs matériels à chaque serveur de test : libx264 directement.
+    transcodeEncoder: 'software',
     ...overrides,
   };
   const server = await createServer(resolveConfig(config), { logStream });
@@ -222,7 +224,13 @@ export async function waitFor<T>(
 
 export async function startPlayback(
   client: ApiClient,
-  body: { portalId: string; channelId: string; fallbacks?: { portalId: string; channelId: string }[] },
+  body: {
+    portalId: string;
+    channelId: string;
+    fallbacks?: { portalId: string; channelId: string }[];
+    caps?: { hevc?: boolean; ac3?: boolean; eac3?: boolean };
+    lowLatency?: boolean;
+  },
 ): Promise<PlaybackDto> {
   const res = await client.post<PlaybackDto>('/api/playback', body);
   if (res.status !== 201) throw new Error(`lecture refusée : ${res.status} ${res.text}`);
@@ -273,6 +281,42 @@ export function decodeErrors(segment: Buffer): Promise<string> {
     child.stderr.on('data', (c: Buffer) => (stderr += c.toString()));
     child.on('error', reject);
     child.on('close', () => resolve(stderr.trim()));
+    child.stdin.on('error', () => undefined);
+    child.stdin.end(segment);
+  });
+}
+
+const FFPROBE = process.env['FFPROBE_PATH'] ?? 'ffprobe';
+
+/** Codecs des flux d'un segment MPEG-TS, vus par ffprobe (« h264 », « aac »…). */
+export function probeCodecs(segment: Buffer): Promise<{ video: string | null; audio: string | null }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      FFPROBE,
+      [
+        '-hide_banner',
+        '-v',
+        'error',
+        '-show_entries',
+        'stream=codec_type,codec_name',
+        '-of',
+        'json',
+        '-i',
+        'pipe:0',
+      ],
+      { stdio: ['pipe', 'pipe', 'ignore'] },
+    );
+    let out = '';
+    child.stdout.on('data', (c: Buffer) => (out += c.toString()));
+    child.on('error', reject);
+    child.on('close', () => {
+      const streams =
+        (JSON.parse(out || '{}') as { streams?: { codec_type: string; codec_name: string }[] }).streams ?? [];
+      resolve({
+        video: streams.find((s) => s.codec_type === 'video')?.codec_name ?? null,
+        audio: streams.find((s) => s.codec_type === 'audio')?.codec_name ?? null,
+      });
+    });
     child.stdin.on('error', () => undefined);
     child.stdin.end(segment);
   });

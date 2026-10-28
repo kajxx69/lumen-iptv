@@ -10,6 +10,7 @@ import { focusDefault } from '../nav/use-dpad.js';
 import { type PlaybackStats, useHls } from '../player/use-hls.js';
 import { request } from '../api/client.js';
 import { usePlaybackSession } from '../player/use-playback-session.js';
+import { usePrefs } from '../state/prefs.js';
 import { goBack, navigate } from '../state/router.js';
 
 /** Les commandes s'effacent après ce délai sans action : l'image d'abord. */
@@ -37,9 +38,18 @@ function sourceLabel(
     : merged
       ? ` · ${portalName(status.activePortalId)}${ready}`
       : ready;
+  // Conversion pour ce navigateur : signalée, et précisée si le processeur du serveur s'en charge.
+  const converted =
+    status.transcode === null
+      ? ''
+      : status.transcode.video === 'copy'
+        ? ' · son converti'
+        : status.transcode.hardware
+          ? ' · image convertie'
+          : ' · image convertie (qualité réduite)';
   if (status.state === 'recovering') return { text: `Reprise en cours${source}`, warn: true };
   if (status.state === 'starting') return { text: `Démarrage${source}`, warn: true };
-  return { text: `En direct${source}`, warn: elsewhere };
+  return { text: `En direct${source}${converted}`, warn: elsewhere };
 }
 
 /** Chaîne voisine dans la liste (genre de la chaîne en cours), en boucle. */
@@ -59,7 +69,11 @@ export function WatchScreen({ portalId, channelId }: { portalId: string; channel
   const videoRef = useRef<HTMLVideoElement>(null);
   const { catalog } = useCatalog(portalId);
   const channel = catalog?.byId.get(channelId);
-  const session = usePlaybackSession(portalId, channelId);
+  // « Direct au plus près » mémorisé par chaîne sur cet appareil (le match en direct, le reste en confort).
+  const channelKey = `${portalId}:${channelId}`;
+  const lowLatency = usePrefs((s) => s.lowLatency.includes(channelKey));
+  const toggleLowLatency = usePrefs((s) => s.toggleLowLatency);
+  const session = usePlaybackSession(portalId, channelId, lowLatency);
   const streamUrl = session.state.kind === 'ready' ? session.state.playback.streamUrl : null;
   const sessionId = session.state.kind === 'ready' ? session.state.playback.sessionId : null;
   const reportStats = useCallback(
@@ -73,7 +87,7 @@ export function WatchScreen({ portalId, channelId }: { portalId: string; channel
     },
     [sessionId],
   );
-  const player = useHls(videoRef, streamUrl, session.restart, reportStats);
+  const player = useHls(videoRef, streamUrl, session.restart, reportStats, lowLatency);
   const epg = useEpg(portalId, [channelId]);
   const programme = nowNext(epg(channelId) ?? [], Date.now());
   const favorites = useFavorites();
@@ -257,10 +271,27 @@ export function WatchScreen({ portalId, channelId }: { portalId: string; channel
           >
             ▼ Chaîne suivante
           </button>
+          <button
+            type="button"
+            className={`button${lowLatency ? ' primary' : ''}`}
+            data-nav
+            aria-pressed={lowLatency}
+            title={
+              lowLatency
+                ? 'Quelques secondes du direct : une coupure du serveur se verrait aussitôt'
+                : '20 s de retard qui absorbent les coupures du serveur'
+            }
+            onClick={() => {
+              toggleLowLatency(channelKey);
+            }}
+          >
+            ⚡ Direct au plus près
+          </button>
           <span className="spacer" />
           {player.latencyS !== null && Number.isFinite(player.latencyS) && (
             <span
               className="source"
+              data-testid="live-latency"
               title="Retard sur le direct : il protège la lecture des coupures du serveur"
             >
               Direct −{Math.round(player.latencyS)} s

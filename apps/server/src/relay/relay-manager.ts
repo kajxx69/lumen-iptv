@@ -25,7 +25,8 @@ export interface RelayManagerOptions {
 export class RelayManager {
   private readonly relays = new Map<string, Relay>();
   private readonly lingerTimers = new Map<Relay, NodeJS.Timeout>();
-  private readonly cache: SegmentCache;
+  /** Cache des segments évincés : partagé avec les sorties transcodées. */
+  readonly cache: SegmentCache;
   readonly metrics: RelayMetrics;
 
   constructor(

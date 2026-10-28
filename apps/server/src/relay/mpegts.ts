@@ -20,10 +20,14 @@ const PMT_HEADER_BYTES = 12;
 
 export type VideoCodec = 'h264' | 'hevc' | 'mpeg2' | 'other';
 
+export type AudioCodec = 'aac' | 'mp3' | 'ac3' | 'eac3' | 'other';
+
 export interface ProgramStreams {
   videoPid: number | null;
   videoCodec: VideoCodec | null;
   audioPids: number[];
+  /** Codec de la première piste audio : il décide de la conversion éventuelle. */
+  audioCodec: AudioCodec | null;
 }
 
 /** Types de flux élémentaires (ISO 13818-1 tableau 2-34 et usages DVB/ATSC courants). */
@@ -35,7 +39,27 @@ const VIDEO_STREAM_TYPES: Record<number, VideoCodec> = {
   0x24: 'hevc',
   0x42: 'other', // AVS
 };
-const AUDIO_STREAM_TYPES = new Set([0x03, 0x04, 0x0f, 0x11, 0x81, 0x87]);
+const AUDIO_STREAM_TYPES: Record<number, AudioCodec> = {
+  0x03: 'mp3',
+  0x04: 'mp3',
+  0x0f: 'aac',
+  // AAC LATM : aucun navigateur ne le lit, il sera converti.
+  0x11: 'other',
+  0x81: 'ac3',
+  0x87: 'eac3',
+};
+/** Flux privé DVB (0x06) : l'audio s'y reconnaît à son descripteur (EN 300 468). */
+const PRIVATE_STREAM_TYPE = 0x06;
+const AUDIO_DESCRIPTORS: Record<number, AudioCodec> = { 0x6a: 'ac3', 0x7a: 'eac3', 0x7c: 'aac' };
+
+/** Codec annoncé par les descripteurs d'un flux privé, ou null (télétexte, sous-titres…). */
+function privateAudioCodec(buf: Uint8Array, from: number, to: number): AudioCodec | null {
+  for (let d = from; d + 2 <= to; d += 2 + byteAt(buf, d + 1)) {
+    const codec = AUDIO_DESCRIPTORS[byteAt(buf, d)];
+    if (codec !== undefined) return codec;
+  }
+  return null;
+}
 
 const byteAt = (buf: Uint8Array, at: number): number => buf[at] ?? 0;
 
@@ -131,18 +155,24 @@ export function parsePmt(buf: Uint8Array, off: number): ProgramStreams | null {
   if (s < 0 || byteAt(buf, s) !== PMT_TABLE_ID) return null;
   const end = sectionEnd(buf, s, off + TS_PACKET_SIZE);
   const programInfo = ((byteAt(buf, s + 10) & 0x0f) << 8) | byteAt(buf, s + 11);
-  const out: ProgramStreams = { videoPid: null, videoCodec: null, audioPids: [] };
+  const out: ProgramStreams = { videoPid: null, videoCodec: null, audioPids: [], audioCodec: null };
   for (let i = s + PMT_HEADER_BYTES + programInfo; i + 5 <= end;) {
     const type = byteAt(buf, i);
     const pid = ((byteAt(buf, i + 1) & 0x1f) << 8) | byteAt(buf, i + 2);
+    const infoLength = ((byteAt(buf, i + 3) & 0x0f) << 8) | byteAt(buf, i + 4);
     const codec = VIDEO_STREAM_TYPES[type];
+    const audio =
+      type === PRIVATE_STREAM_TYPE
+        ? privateAudioCodec(buf, i + 5, Math.min(i + 5 + infoLength, end))
+        : (AUDIO_STREAM_TYPES[type] ?? null);
     if (codec !== undefined && out.videoPid === null) {
       out.videoPid = pid;
       out.videoCodec = codec;
-    } else if (AUDIO_STREAM_TYPES.has(type)) {
+    } else if (audio !== null) {
       out.audioPids.push(pid);
+      out.audioCodec ??= audio;
     }
-    i += 5 + (((byteAt(buf, i + 3) & 0x0f) << 8) | byteAt(buf, i + 4));
+    i += 5 + infoLength;
   }
   return out;
 }

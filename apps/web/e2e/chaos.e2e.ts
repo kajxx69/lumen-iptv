@@ -32,9 +32,9 @@ interface Ctx {
   portalA: string;
   portalB: string;
   /**
-   * Portails servis par le portail factice B : « Chaos B », mais aussi ceux qu'ont ajoutés
-   * les autres tests du même serveur. La fusion les réunit tous en sources d'une même
-   * chaîne ; basculer sur l'un d'eux, c'est échapper à la panne de A.
+   * Portails servis par un autre serveur que le portail factice A : « Chaos B », mais aussi
+   * ceux qu'ont ajoutés les autres tests du même serveur. La fusion les réunit tous en
+   * sources d'une même chaîne ; basculer sur l'un d'eux, c'est échapper à la panne de A.
    */
   bSide: Set<string>;
   /** Chaînes de A qui existent aussi sur B (source de secours possible). */
@@ -91,9 +91,9 @@ async function setup(page: Page): Promise<Ctx> {
     // Le catalogue de B doit être connu du serveur pour qu'il y trouve des sources.
     await page.request.get(`/api/portals/${portalB}/channels`);
   }
-  const hostB = new URL(PORTAL_B_URL).host;
+  const hostA = new URL(PORTAL_A_URL).host;
   const portals = (await (await page.request.get('/api/portals')).json()) as { id: string; host: string }[];
-  ctx.bSide = new Set(portals.filter((p) => p.host === hostB).map((p) => p.id));
+  ctx.bSide = new Set(portals.filter((p) => p.host !== hostA).map((p) => p.id));
   await page.goto('/');
   await page.evaluate((id) => {
     localStorage.setItem('lumen.portal', id);

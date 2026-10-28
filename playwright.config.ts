@@ -4,9 +4,12 @@ import { defineConfig, devices } from '@playwright/test';
 const FAKE_PORTAL_PORT = Number(process.env['FAKE_PORTAL_E2E_PORT'] ?? 18080);
 // Second portail : source de secours des tests de bascule.
 const FAKE_PORTAL_B_PORT = Number(process.env['FAKE_PORTAL_B_E2E_PORT'] ?? 18081);
+// Troisième portail : MPEG-2 + AC-3, que le navigateur ne lit pas (transcodage).
+const FAKE_PORTAL_C_PORT = Number(process.env['FAKE_PORTAL_C_E2E_PORT'] ?? 18082);
 const SERVER_PORT = Number(process.env['LUMEN_E2E_PORT'] ?? 18090);
 const FAKE_PORTAL_URL = `http://127.0.0.1:${FAKE_PORTAL_PORT}`;
 const FAKE_PORTAL_B_URL = `http://127.0.0.1:${FAKE_PORTAL_B_PORT}`;
+const FAKE_PORTAL_C_URL = `http://127.0.0.1:${FAKE_PORTAL_C_PORT}`;
 const SERVER_URL = `http://127.0.0.1:${SERVER_PORT}`;
 // Première génération des mires FFmpeg, ou construction de l'interface sur une machine chargée.
 const WEB_SERVER_START_TIMEOUT_MS = 300_000;
@@ -15,6 +18,7 @@ const WEB_SERVER_START_TIMEOUT_MS = 300_000;
 process.env['E2E_ADMIN_PASSWORD'] ??= randomBytes(12).toString('hex');
 process.env['E2E_FAKE_PORTAL_URL'] = FAKE_PORTAL_URL;
 process.env['E2E_FAKE_PORTAL_B_URL'] = FAKE_PORTAL_B_URL;
+process.env['E2E_FAKE_PORTAL_C_URL'] = FAKE_PORTAL_C_URL;
 const ADMIN_PASSWORD = process.env['E2E_ADMIN_PASSWORD'];
 process.env['E2E_METRICS_TOKEN'] ??= randomBytes(16).toString('hex');
 const METRICS_TOKEN = process.env['E2E_METRICS_TOKEN'];
@@ -55,6 +59,21 @@ export default defineConfig({
         FAKE_PORTAL_CHANNEL_COUNT: '50',
         // Autre façon de nommer les mêmes chaînes (« Nova TV France 1080 ») : la fusion doit s'en sortir.
         FAKE_PORTAL_NAMING_STYLE: 'plain',
+      },
+    },
+    {
+      command: 'pnpm --filter @lumen/fake-portal start',
+      url: `${FAKE_PORTAL_C_URL}/_health`,
+      reuseExistingServer: !process.env['CI'],
+      timeout: WEB_SERVER_START_TIMEOUT_MS,
+      env: {
+        FAKE_PORTAL_PORT: String(FAKE_PORTAL_C_PORT),
+        FAKE_PORTAL_HOST: '127.0.0.1',
+        FAKE_PORTAL_SEED: '3',
+        FAKE_PORTAL_NAME: 'Lumen Fake Portal C',
+        FAKE_PORTAL_CHANNEL_COUNT: '10',
+        FAKE_PORTAL_VIDEO_CODEC: 'mpeg2',
+        FAKE_PORTAL_AUDIO_CODEC: 'ac3',
       },
     },
     {

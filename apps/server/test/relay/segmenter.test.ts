@@ -25,6 +25,7 @@ const OPTIONS: SegmenterOptions = {
   timestampJumpS: 5,
   minFlushDurationS: 0.5,
   fastStartS: 0,
+  partTargetS: 0,
 };
 
 function segment(
@@ -206,6 +207,59 @@ describe('découpeur MPEG-TS', () => {
       expect(durations(fresh)).toEqual([0.52, 0.52, 0.52]);
       expect(fresh[0]!.discontinuity).toBe(true);
       expect(startsWithIdr(fresh[0]!.data, 0x21)).toBe(true);
+    });
+  });
+
+  describe('parties de segment (LL-HLS)', () => {
+    const LL = { partTargetS: 0.5 };
+    const body = (data: Uint8Array): Uint8Array => data.subarray(2 * PACKET);
+
+    it('chaque segment se découpe en parties de 0,5 s au plus, publiées avant lui', () => {
+      const parts: number[] = [];
+      const order: string[] = [];
+      const seg = new TsSegmenter(
+        { ...OPTIONS, ...LL },
+        (d) => order.push(`segment ${d.durationS.toFixed(2)}`),
+        (p) => {
+          parts.push(Number(p.durationS.toFixed(2)));
+          order.push('partie');
+        },
+      );
+      seg.push(buildStream({ durationS: 4.5 }));
+      // Images de 40 ms : une partie s'arrête avant de dépasser 0,5 s, soit 12 images (0,48 s).
+      expect(parts.slice(0, 4)).toEqual([0.48, 0.48, 0.48, 0.48]);
+      expect(Math.max(...parts)).toBeLessThanOrEqual(LL.partTargetS);
+      expect(order.indexOf('segment 2.00')).toBeGreaterThan(order.indexOf('partie'));
+    });
+
+    it('les parties d un segment le reconstituent exactement, chacune décodable à la suite', () => {
+      const { out } = segment(buildStream({ durationS: 4.5 }), LL);
+      const first = out[0]!;
+      expect(first.parts.length).toBeGreaterThan(1);
+      for (const p of first.parts) {
+        // PAT et PMT en tête de chaque partie : le lecteur peut commencer à n'importe laquelle.
+        expect(pidOf(p.data, 0)).toBe(0);
+        expect(pidOf(p.data, 1)).toBe(PMT_PID);
+      }
+      expect(Buffer.concat(first.parts.map((p) => body(p.data)))).toEqual(Buffer.from(body(first.data)));
+      expect(first.parts.reduce((t, p) => t + p.durationS, 0)).toBeCloseTo(first.durationS, 5);
+      expect(first.parts.map((p) => p.independent)).toEqual([true, ...first.parts.slice(1).map(() => false)]);
+      // Compteurs de continuité des tables propres aux parties : continus d'une partie à l'autre.
+      const all = out.flatMap((d) => d.parts);
+      expect(all.map((p) => ccOf(p.data, 0))).toEqual(all.map((_, i) => i % 16));
+    });
+
+    it('sans cible de partie : aucune partie (lecture confort)', () => {
+      const { out } = segment(buildStream({ durationS: 4.5 }));
+      expect(out.every((d) => d.parts.length === 0)).toBe(true);
+    });
+
+    it('une rupture garde les parties déjà annoncées : leur segment est publié, même court', () => {
+      const { out, seg } = segment(buildStream({ durationS: 4.6 }), { ...LL, minFlushDurationS: 1 });
+      seg.breakStream();
+      const last = out.at(-1)!;
+      expect(last.durationS).toBeCloseTo(0.6, 2);
+      expect(last.parts.length).toBeGreaterThan(0);
     });
   });
 

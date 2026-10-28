@@ -20,6 +20,9 @@ export const ErrorCode = z.enum([
   'nothing_to_play',
   /** Aucune source de la chaîne n'a produit d'image dans le délai de démarrage. */
   'stream_unavailable',
+  // Conversion vidéo saturée sur le serveur, ou format illisible par ce navigateur sans conversion.
+  'transcode_busy',
+  'unsupported_codec',
   'internal',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
@@ -220,9 +223,26 @@ export const MAX_FALLBACK_SOURCES = 4;
 export const ChannelRef = z.object({ portalId: z.string().min(1), channelId: z.string().min(1) });
 export type ChannelRef = z.infer<typeof ChannelRef>;
 
+/**
+ * Ce que le navigateur sait décoder au-delà du socle H.264 + AAC (+ MP3). Inconnu : on
+ * suppose le socle seul, et tout le reste est transcodé.
+ */
+export const ClientCapabilities = z.object({
+  hevc: z.boolean().default(false),
+  ac3: z.boolean().default(false),
+  eac3: z.boolean().default(false),
+});
+export type ClientCapabilities = z.infer<typeof ClientCapabilities>;
+
 export const PlaybackRequest = ChannelRef.extend({
   /** La même chaîne sur d'autres portails, par ordre de préférence : le relais y bascule en cas de panne. */
   fallbacks: z.array(ChannelRef).max(MAX_FALLBACK_SOURCES).default([]),
+  caps: ClientCapabilities.default({ hevc: false, ac3: false, eac3: false }),
+  /**
+   * « Direct au plus près » (LL-HLS) : la playlist annonce des parties de segment, le
+   * lecteur joue à 3–5 s du direct. Sinon, confort : 20 s de retard qui absorbent les coupures.
+   */
+  lowLatency: z.boolean().default(false),
 });
 export type PlaybackRequest = z.infer<typeof PlaybackRequest>;
 
@@ -252,6 +272,18 @@ export const PlaybackStatusDto = z.object({
   sourceCount: z.number(),
   /** Secondes de flux gardées par le relais, disponibles pour le lecteur. */
   bufferedS: z.number(),
+  /**
+   * Conversion en cours pour ce navigateur (PROJECT.md §8), null si le flux est servi tel
+   * quel. `hardware` faux : le processeur du serveur transcode, l'image est réduite.
+   */
+  transcode: z
+    .object({ video: z.enum(['copy', 'h264']), audio: z.enum(['copy', 'aac']), hardware: z.boolean() })
+    .nullable(),
+  /**
+   * La source en cours a des codecs que ce navigateur ne lit pas tels quels (bascule vers une
+   * source d'un autre format) : le lecteur rouvre sa session, qui sera convertie.
+   */
+  restartRequired: z.boolean(),
 });
 export type PlaybackStatusDto = z.infer<typeof PlaybackStatusDto>;
 

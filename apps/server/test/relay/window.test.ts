@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { renderPlaylist } from '../../src/relay/playlist.js';
 import { SegmentCache } from '../../src/relay/segment-cache.js';
 import { type RelaySegment, SegmentWindow } from '../../src/relay/segment-window.js';
+import type { PartDraft } from '../../src/relay/segmenter.js';
 
 const T0 = Date.UTC(2026, 9, 27, 20, 0, 0);
 
@@ -11,6 +12,7 @@ const draft = (durationS: number, discontinuity = false, bytes = 10) => ({
   discontinuity,
   independent: true,
   sourceId: 'a',
+  parts: [] as PartDraft[],
 });
 
 describe('fenêtre glissante de segments', () => {
@@ -153,5 +155,68 @@ describe('cache LRU des segments évincés', () => {
     expect(cache.get('a', 1)).toBeUndefined();
     expect(cache.get('b', 1)).toBeDefined();
     expect(cache.bytes).toBe(10);
+  });
+});
+
+describe('parties de segment (LL-HLS)', () => {
+  const part = (durationS: number, independent = false, discontinuity = false) => ({
+    data: Buffer.alloc(4, 2),
+    durationS,
+    independent,
+    discontinuity,
+  });
+
+  it('les parties du segment en cours sont servies, puis rattachées au segment publié', () => {
+    const w = new SegmentWindow(60, undefined, 20);
+    w.appendPart(part(0.48, true));
+    w.appendPart(part(0.48));
+    expect(w.pendingParts).toHaveLength(2);
+    expect(w.part(0, 1)?.durationS).toBe(0.48);
+    w.append({ ...draft(1), parts: [part(0.48, true), part(0.48), part(0.04)] }, T0);
+    expect(w.pendingParts).toHaveLength(0);
+    expect(w.part(0, 2)?.durationS).toBe(0.04);
+    expect(w.part(1, 0)).toBeUndefined();
+  });
+
+  it('les parties des segments anciens sont libérées (au-delà de la durée gardée)', () => {
+    const w = new SegmentWindow(60, undefined, 4);
+    for (let i = 0; i < 4; i++) w.append({ ...draft(2), parts: [part(1, true), part(1)] }, T0 + i * 2000);
+    expect(w.segments.map((s) => s.parts.length)).toEqual([0, 0, 2, 2]);
+  });
+
+  it('playlist « direct au plus près » : parties annoncées, partie suivante en indice', () => {
+    const w = new SegmentWindow(60, undefined, 20);
+    w.append({ ...draft(1), parts: [part(0.5, true), part(0.5)] }, T0);
+    w.appendPart(part(0.48, true, true));
+    const text = renderPlaylist(
+      {
+        mediaSequence: w.mediaSequence,
+        discontinuitySequence: 0,
+        segments: w.segments,
+        targetDurationS: 6,
+        blockingReload: { holdBackS: 20 },
+        lowLatency: { partTargetS: 0.5, partHoldBackS: 1.5, pendingParts: w.pendingParts, nextSeq: 1 },
+      },
+      (seq, p) => (p === undefined ? `seg/${seq}.ts` : `seg/${seq}.${p}.ts`),
+    );
+    expect(text).toContain('#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.500\n');
+    expect(text).toContain('#EXT-X-PART-INF:PART-TARGET=0.500\n');
+    expect(text).toContain('#EXT-X-PART:DURATION=0.500,URI="seg/0.0.ts",INDEPENDENT=YES\n');
+    expect(text).toContain('#EXT-X-PART:DURATION=0.500,URI="seg/0.1.ts"\n');
+    // Partie en cours d'une nouvelle source : la jonction est annoncée avant elle.
+    expect(text).toMatch(
+      /seg\/0\.ts\n#EXT-X-DISCONTINUITY\n#EXT-X-PART:DURATION=0\.480,URI="seg\/1\.0\.ts",INDEPENDENT=YES\n/,
+    );
+    expect(text.trimEnd().endsWith('#EXT-X-PRELOAD-HINT:TYPE=PART,URI="seg/1.1.ts"')).toBe(true);
+  });
+
+  it('playlist confort : aucune partie, même si le relais en produit', () => {
+    const w = new SegmentWindow(60, undefined, 20);
+    w.append({ ...draft(1), parts: [part(0.5, true), part(0.5)] }, T0);
+    const text = renderPlaylist(
+      { mediaSequence: 0, discontinuitySequence: 0, segments: w.segments, targetDurationS: 6 },
+      (seq) => `seg/${seq}.ts`,
+    );
+    expect(text).not.toContain('EXT-X-PART');
   });
 });

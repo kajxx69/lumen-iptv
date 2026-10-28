@@ -3,11 +3,14 @@ import type { HealthEvent } from '@lumen/core/resilience';
 import type { FastifyBaseLogger } from 'fastify';
 import type { ContentAnalyzer } from '../resilience/content-analyzer.js';
 import { type FailoverOptions, FailoverPolicy } from './failover.js';
-import { renderPlaylist } from './playlist.js';
+import type { TranscodedOutput } from '../transcode/transcoded-output.js';
+import { MediaOutput, type MediaOutputOptions } from './media-output.js';
+import type { ProgramStreams } from './mpegts.js';
+import type { SegmentUri } from './playlist.js';
 import type { RelayMetrics } from './relay-metrics.js';
 import type { SegmentCache } from './segment-cache.js';
-import { SegmentWindow } from './segment-window.js';
-import { type SegmentDraft, type SegmenterOptions, TsSegmenter } from './segmenter.js';
+import type { RelaySegment } from './segment-window.js';
+import type { SegmentDraft, SegmenterOptions } from './segmenter.js';
 import { type UpstreamLink, type UpstreamOptions, UpstreamError, readUpstream, sleep } from './upstream.js';
 
 /** Une source possible pour la chaîne relayée : un couple (portail, chaîne). */
@@ -39,6 +42,8 @@ export interface RelayOptions {
   targetDurationS: number;
   /** HOLD-BACK annoncé aux lecteurs : retard visé sur le direct au démarrage. */
   holdBackS: number;
+  /** PART-HOLD-BACK : retard visé en « direct au plus près » (LL-HLS). */
+  partHoldBackS: number;
   segmenter: SegmenterOptions;
   upstream: UpstreamOptions;
   failover: FailoverOptions;
@@ -88,8 +93,10 @@ const SWITCH_REASONS = new Set<ConnectionEnd>(['switch', 'frozen', 'content', 's
  */
 export class Relay {
   readonly id = randomUUID();
-  private readonly window: SegmentWindow;
-  private readonly segmenter: TsSegmenter;
+  /** Sortie directe : le flux amont tel quel, découpé. */
+  readonly output: MediaOutput;
+  /** Sorties transcodées, par plan (voir transcode/plan) : nourries du même flux amont. */
+  private readonly transcodedOutputs = new Map<string, TranscodedOutput>();
   private readonly policy: FailoverPolicy;
   private readonly sources: RelaySource[];
   private readonly closeController = new AbortController();
@@ -112,8 +119,6 @@ export class Relay {
   private connectionOpenedAt = 0;
   /** Secondes consécutives d'image noire ou de silence de la source en cours. */
   private deadS = 0;
-  /** Lecteurs en attente d'un segment précis (rechargement bloquant). */
-  private readonly segmentWaiters = new Set<{ seq: number; done: () => void }>();
   viewers = 0;
   idleSince: number | null = null;
 
@@ -128,12 +133,15 @@ export class Relay {
     this.sources = [...sources];
     this.current = first;
     this.log = deps.log.child({ relay: this.id });
-    this.window = new SegmentWindow(options.bufferS, (s) => {
-      deps.cache.put(this.id, s.seq, s.data);
-    });
-    this.segmenter = new TsSegmenter(options.segmenter, (d) => {
-      this.onSegment(d);
-    });
+    this.output = new MediaOutput(
+      this.id,
+      options,
+      deps.cache,
+      () => this.current.id,
+      (segment, draft) => {
+        this.onSegment(segment, draft);
+      },
+    );
     this.policy = new FailoverPolicy(() => this.sources.length, options.failover);
   }
 
@@ -149,7 +157,7 @@ export class Relay {
   }
 
   get bufferedBytes(): number {
-    return this.window.bytes;
+    return this.output.bytes;
   }
 
   /** Indicateur de source et de santé pour le lecteur. */
@@ -158,7 +166,7 @@ export class Relay {
       activeSource: Math.max(0, this.sources.indexOf(this.current)),
       activePortalId: this.current.portalId,
       sourceCount: this.sources.length,
-      bufferedS: this.window.bufferedS,
+      bufferedS: this.output.window.bufferedS,
     };
   }
 
@@ -192,46 +200,60 @@ export class Relay {
     });
   }
 
-  playlist(uri: (seq: number) => string): string {
-    return renderPlaylist(
-      {
-        mediaSequence: this.window.mediaSequence,
-        discontinuitySequence: this.window.discontinuitySequence,
-        segments: this.window.segments,
-        targetDurationS: this.options.targetDurationS,
-        blockingReload: { holdBackS: this.options.holdBackS },
-      },
-      uri,
-    );
+  playlist(uri: SegmentUri, lowLatency = false): string {
+    return this.output.playlist(uri, lowLatency);
+  }
+
+  /** Codecs du flux amont en cours (connus dès la PMT) ; null avant. */
+  get programStreams(): ProgramStreams | null {
+    return this.output.segmenter.programStreams;
+  }
+
+  get mediaOptions(): MediaOutputOptions {
+    return this.options;
+  }
+
+  get currentSourceId(): string {
+    return this.current.id;
+  }
+
+  transcoded(key: string): TranscodedOutput | undefined {
+    return this.transcodedOutputs.get(key);
+  }
+
+  /** Branche une sortie transcodée, amorcée avec le flux récent : elle démarre sans attendre. */
+  attachTranscoded(output: TranscodedOutput): void {
+    this.transcodedOutputs.set(output.key, output);
+    output.start(this.output.recentStream(), this.programStreams);
+  }
+
+  detachTranscoded(key: string): void {
+    this.transcodedOutputs.delete(key);
+  }
+
+  /** Rupture du flux (nouvelle source, discontinuité amont) : toutes les sorties la marquent. */
+  private breakStreams(): void {
+    this.output.segmenter.breakStream();
+    for (const t of this.transcodedOutputs.values()) t.restart();
   }
 
   /** Prochain numéro de segment (celui que publiera la source). */
   get nextSeq(): number {
-    return (this.window.segments.at(-1)?.seq ?? this.window.mediaSequence - 1) + 1;
+    return this.output.nextSeq;
   }
 
-  /**
-   * Rechargement bloquant : résolu dès que le segment `seq` est publié, ou à l'échéance
-   * (la playlist actuelle part alors telle quelle, le lecteur redemandera).
-   */
-  waitForSegment(seq: number, timeoutMs: number): Promise<void> {
-    if (seq < this.nextSeq || this.isClosed()) return Promise.resolve();
-    return new Promise((resolve) => {
-      const waiter = { seq, done: (): void => undefined };
-      const timer = setTimeout(() => {
-        waiter.done();
-      }, timeoutMs);
-      waiter.done = () => {
-        clearTimeout(timer);
-        this.segmentWaiters.delete(waiter);
-        resolve();
-      };
-      this.segmentWaiters.add(waiter);
-    });
+  /** Rechargement bloquant : voir MediaOutput.waitFor. */
+  waitFor(seq: number, part: number | undefined, timeoutMs: number): Promise<void> {
+    if (this.isClosed()) return Promise.resolve();
+    return this.output.waitFor(seq, part, timeoutMs);
   }
 
   segment(seq: number): Buffer | undefined {
-    return this.window.get(seq)?.data ?? this.deps.cache.get(this.id, seq);
+    return this.output.segment(seq);
+  }
+
+  part(seq: number, index: number): Buffer | undefined {
+    return this.output.part(seq, index);
   }
 
   /** Bascule immédiate vers la source suivante (gel, écran noir, débit, tests). */
@@ -250,9 +272,10 @@ export class Relay {
     this.closeController.abort();
     this.connectionEnd = 'closed';
     this.connection?.abort();
-    this.deps.cache.forget(this.id);
+    this.output.close();
+    for (const t of this.transcodedOutputs.values()) t.close();
+    this.transcodedOutputs.clear();
     this.rejectWaiters(new RelayUnavailableError('relais fermé'));
-    for (const w of [...this.segmentWaiters]) w.done();
     this.log.info({ reason, segments: this.published }, 'relais fermé');
   }
 
@@ -268,7 +291,7 @@ export class Relay {
       const produced = end.produced;
       const source = this.current;
       // Le morceau en cours est publié s'il est utile ; la suite portera une discontinuité.
-      this.segmenter.breakStream();
+      this.breakStreams();
       this.deadS = 0;
       this.arrivals = [];
       if (end.kind !== 'switch' && end.kind !== 'ended')
@@ -319,7 +342,7 @@ export class Relay {
     this.connectionOpenedAt = openedAt;
     let progressAt = openedAt;
     // Gel : les horodatages n'avancent plus alors que les octets arrivent toujours.
-    const advancesAtStart = this.segmenter.stats.timestampAdvances;
+    const advancesAtStart = this.output.segmenter.stats.timestampAdvances;
     let advances = advancesAtStart;
     let advancedAt = openedAt;
     const detection = this.options.detection;
@@ -331,7 +354,7 @@ export class Relay {
         controller.abort();
         return;
       }
-      const seen = this.segmenter.stats.timestampAdvances;
+      const seen = this.output.segmenter.stats.timestampAdvances;
       if (seen !== advances) {
         advances = seen;
         advancedAt = now;
@@ -381,14 +404,16 @@ export class Relay {
               this.lastBytesAt = now;
               this.arrivals.push({ at: now, bytes: bytes.length });
               this.deps.metrics.bytesIn.inc({}, bytes.length);
-              this.segmenter.push(bytes);
+              this.output.segmenter.push(bytes);
+              const streams = this.programStreams;
+              for (const t of this.transcodedOutputs.values()) t.write(bytes, streams);
             },
             discontinuity: () => {
-              this.segmenter.breakStream();
+              this.breakStreams();
             },
             skipped: () => {
               this.deps.metrics.skippedSegments.inc();
-              this.segmenter.breakStream();
+              this.breakStreams();
             },
           },
           controller.signal,
@@ -449,9 +474,8 @@ export class Relay {
     });
   }
 
-  private onSegment(draft: SegmentDraft): void {
+  private onSegment(segment: RelaySegment, draft: SegmentDraft): void {
     const now = Date.now();
-    const segment = this.window.append({ ...draft, sourceId: this.current.id }, now);
     if (this.lastSegmentAt < this.connectionOpenedAt) this.emit(this.current, { kind: 'up', at: now });
     this.lastSegmentAt = now;
     this.published++;
@@ -471,9 +495,9 @@ export class Relay {
     }
     const m = this.deps.metrics;
     m.segments.inc();
-    const forced = this.segmenter.stats.forcedCuts - this.forcedCutsSeen;
+    const forced = this.output.segmenter.stats.forcedCuts - this.forcedCutsSeen;
     if (forced > 0) m.forcedCuts.inc({}, forced);
-    this.forcedCutsSeen = this.segmenter.stats.forcedCuts;
+    this.forcedCutsSeen = this.output.segmenter.stats.forcedCuts;
     if (this.published === 1) {
       m.startupSeconds.observe((now - this.openedAt) / 1000);
       this.log.info({ ms: now - this.openedAt, durationS: segment.durationS }, 'premier segment publié');
@@ -489,7 +513,6 @@ export class Relay {
     const waiters = this.waiters;
     this.waiters = [];
     for (const w of waiters) w.resolve();
-    for (const w of [...this.segmentWaiters]) if (w.seq <= segment.seq) w.done();
   }
 
   private rejectWaiters(err: Error): void {

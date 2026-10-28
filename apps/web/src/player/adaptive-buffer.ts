@@ -35,6 +35,18 @@ export const ADAPTIVE_BUFFER: AdaptiveBufferOptions = {
   decayPerMinuteS: 2,
 };
 
+/**
+ * « Direct au plus près » : le spectateur a choisi la latence. Plancher de 3 s (PROJECT.md :
+ * 3–5 s), plafond de 8 s quand le réseau peine : au-delà, ce ne serait plus du direct.
+ */
+export const ADAPTIVE_BUFFER_LOW_LATENCY: AdaptiveBufferOptions = {
+  ...ADAPTIVE_BUFFER,
+  baseS: 3,
+  maxS: 8,
+  stallStepS: 2,
+  slowStepS: 1,
+};
+
 const MINUTE_MS = 60_000;
 
 export class AdaptiveBuffer {

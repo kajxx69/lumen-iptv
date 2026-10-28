@@ -68,20 +68,60 @@ function sourceArgs(kind: AssetKind, media: MediaConfig): string[] {
   ];
 }
 
-export function ffmpegArgs(kind: AssetKind, media: MediaConfig, outDir: string): string[] {
+/** Seuil de détection de scène que FFmpeg demande pour un GOP MPEG-2 fermé. */
+const MPEG2_NO_SCENECUT = 1_000_000_000;
+
+/** Encodage vidéo : GOP fermé de la durée d'un segment, sans images B, débit constant. */
+function videoArgs(media: MediaConfig): string[] {
   const gop = String(media.fps * media.segmentDurationS);
-  const v = media.videoBitrateKbps;
+  const v = `${media.videoBitrateKbps}k`;
+  const rate = ['-b:v', v, '-minrate', v, '-maxrate', v, '-bufsize', v];
+  const gopArgs = ['-g', gop, '-keyint_min', gop, '-sc_threshold', '0', '-bf', '0'];
+  switch (media.videoCodec) {
+    case 'h264':
+      // prettier-ignore
+      return [
+        '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'main', '-pix_fmt', 'yuv420p',
+        ...gopArgs,
+        // CBR strict : débit constant, y compris sur l'écran noir, comme un encodeur de diffusion.
+        ...rate, '-x264-params', 'nal-hrd=cbr',
+      ];
+    case 'hevc':
+      // prettier-ignore
+      return [
+        '-c:v', 'libx265', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', ...gopArgs, ...rate,
+        '-x265-params', `keyint=${gop}:min-keyint=${gop}:scenecut=0:bframes=0:open-gop=0:log-level=error`,
+      ];
+    case 'mpeg2':
+      // GOP fermé : FFmpeg exige alors de neutraliser la détection de scène par un seuil géant.
+      // prettier-ignore
+      return [
+        '-c:v', 'mpeg2video', '-pix_fmt', 'yuv420p', '-flags', '+cgop',
+        '-g', gop, '-keyint_min', gop, '-sc_threshold', String(MPEG2_NO_SCENECUT), '-bf', '0', ...rate,
+      ];
+  }
+}
+
+function audioArgs(media: MediaConfig): string[] {
+  const common = ['-ac', '2', '-ar', String(media.audioSampleRate)];
+  switch (media.audioCodec) {
+    case 'aac':
+      return ['-c:a', 'aac', '-b:a', `${media.audioBitrateKbps}k`, ...common];
+    case 'ac3':
+      // Débit habituel d'une piste AC-3 stéréo de diffusion.
+      return ['-c:a', 'ac3', '-b:a', '192k', ...common];
+  }
+}
+
+export function ffmpegArgs(kind: AssetKind, media: MediaConfig, outDir: string): string[] {
   // prettier-ignore
   return [
     '-hide_banner', '-loglevel', 'error', '-y',
     ...sourceArgs(kind, media),
     '-t', String(media.loopDurationS),
     '-map', '0:v', '-map', '1:a',
-    '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', 'main', '-pix_fmt', 'yuv420p',
-    '-g', gop, '-keyint_min', gop, '-sc_threshold', '0', '-bf', '0',
-    // CBR strict : débit constant, y compris sur l'écran noir, comme un encodeur de diffusion.
-    '-b:v', `${v}k`, '-minrate', `${v}k`, '-maxrate', `${v}k`, '-bufsize', `${v}k`, '-x264-params', 'nal-hrd=cbr',
-    '-c:a', 'aac', '-b:a', `${media.audioBitrateKbps}k`, '-ac', '2', '-ar', String(media.audioSampleRate),
+    ...videoArgs(media),
+    ...audioArgs(media),
     '-f', 'hls', '-hls_time', String(media.segmentDurationS), '-hls_list_size', '0',
     '-hls_playlist_type', 'vod', '-hls_segment_type', 'mpegts',
     // Une trame audio par PES : permet de retirer précisément la trame d'amorçage AAC.

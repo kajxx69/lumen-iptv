@@ -1,6 +1,8 @@
 import { PlaybackDto, PlaybackStatusDto } from '@lumen/protocol';
+import Hls from 'hls.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, OfflineError, request, requestJson } from '../api/client.js';
+import { detectCapabilities } from './capabilities.js';
 
 /** Après un échec de démarrage, nouvelle tentative automatique : l'utilisateur n'a rien à faire. */
 const START_RETRY_MS = 10_000;
@@ -31,6 +33,19 @@ function describe(err: unknown): { message: string; retry: boolean } {
     }
     if (err.code === 'not_found')
       return { message: 'Cette chaîne n’existe plus sur le portail.', retry: false };
+    if (err.code === 'transcode_busy') {
+      return {
+        message: 'Le serveur convertit déjà le maximum de chaînes à la fois. Nouvel essai automatique…',
+        retry: true,
+      };
+    }
+    if (err.code === 'unsupported_codec') {
+      return {
+        message:
+          'Ce navigateur ne lit pas le format de cette chaîne, et la conversion est désactivée sur le serveur.',
+        retry: false,
+      };
+    }
     if (err.code === 'stream_unavailable') {
       return { message: 'La chaîne ne répond pas pour le moment. Nouvel essai automatique…', retry: true };
     }
@@ -47,6 +62,7 @@ function describe(err: unknown): { message: string; retry: boolean } {
 export function usePlaybackSession(
   portalId: string,
   channelId: string,
+  lowLatency = false,
 ): {
   state: SessionState;
   status: PlaybackStatusDto | null;
@@ -63,7 +79,12 @@ export function usePlaybackSession(
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     setState({ kind: 'starting' });
     setStatus(null);
-    requestJson(PlaybackDto, '/api/playback', { method: 'POST', body: { portalId, channelId } })
+    // Capacités du navigateur : le serveur ne transcode que ce qu'il ne sait pas lire.
+    const caps = detectCapabilities(Hls.isSupported());
+    requestJson(PlaybackDto, '/api/playback', {
+      method: 'POST',
+      body: { portalId, channelId, caps, lowLatency },
+    })
       .then((playback) => {
         if (cancelled) {
           stop(playback.sessionId);
@@ -88,7 +109,7 @@ export function usePlaybackSession(
       if (sessionRef.current !== null) stop(sessionRef.current);
       sessionRef.current = null;
     };
-  }, [portalId, channelId, attempt]);
+  }, [portalId, channelId, attempt, lowLatency]);
 
   // Fermeture de l'onglet : la session est libérée sans attendre son expiration.
   useEffect(() => {
@@ -108,7 +129,10 @@ export function usePlaybackSession(
     const poll = (): void => {
       requestJson(PlaybackStatusDto, `/api/playback/${encodeURIComponent(sessionId)}/status`)
         .then((s) => {
-          if (!cancelled) setStatus(s);
+          if (cancelled) return;
+          setStatus(s);
+          // Nouvelle source d'un autre format : une nouvelle session, convertie pour ce navigateur.
+          if (s.restartRequired) setAttempt((a) => a + 1);
         })
         .catch(() => undefined);
     };

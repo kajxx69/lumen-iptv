@@ -27,6 +27,8 @@ const SLOW_WINDOW_MS = 4000;
  */
 const LIVE_HOLD_BACK_S = 20;
 const MIN_HOLD_BACK_TARGETS = 3;
+/** PART-HOLD-BACK : trois parties d'avance, la valeur que recommande la RFC 8216bis. */
+const PART_HOLD_BACK_PARTS = 3;
 
 export function relayManagerOptions(config: ServerConfig): RelayManagerOptions {
   return {
@@ -36,6 +38,7 @@ export function relayManagerOptions(config: ServerConfig): RelayManagerOptions {
       bufferS: config.relayBufferS,
       targetDurationS: config.relayTargetDurationS,
       holdBackS: Math.max(LIVE_HOLD_BACK_S, MIN_HOLD_BACK_TARGETS * config.relayTargetDurationS),
+      partHoldBackS: PART_HOLD_BACK_PARTS * config.relayPartTargetS,
       stallTimeoutMs: config.relayStallTimeoutMs,
       detection: {
         freezeMs: config.freezeDetectionMs,
@@ -50,6 +53,7 @@ export function relayManagerOptions(config: ServerConfig): RelayManagerOptions {
         timestampJumpS: TIMESTAMP_JUMP_S,
         minFlushDurationS: MIN_FLUSH_DURATION_S,
         fastStartS: config.relayFastStartS,
+        partTargetS: config.relayPartTargetS,
       },
       upstream: {
         connectTimeoutMs: config.upstreamTimeoutMs,

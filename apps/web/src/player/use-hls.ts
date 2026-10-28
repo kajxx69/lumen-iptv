@@ -1,6 +1,6 @@
 import Hls, { type ErrorData } from 'hls.js';
 import { type RefObject, useEffect, useRef, useState } from 'react';
-import { AdaptiveBuffer } from './adaptive-buffer.js';
+import { ADAPTIVE_BUFFER, ADAPTIVE_BUFFER_LOW_LATENCY, AdaptiveBuffer } from './adaptive-buffer.js';
 import { bufferedRanges, stallEscapeTarget } from './gap-jump.js';
 import { LIVE_DELAY, liveRate } from './live-delay.js';
 
@@ -23,6 +23,14 @@ const GAP_CHECK_MS = 100;
 const GAP_STUCK_CHECKS = 2;
 /** Au-delà de ce retard seulement, hls.js revient au direct : bien plus que le tampon maximal (60 s). */
 const MAX_LIVE_LATENCY_S = 120;
+/**
+ * « Direct au plus près » (LL-HLS) : 3 s derrière le direct, cible basse de PROJECT.md
+ * (3–5 s), deux fois l'avance PART-HOLD-BACK du relais. Retard rattrapé en accélérant à
+ * 105 % (imperceptible) ; au-delà de 15 s, hls.js revient au direct : le spectateur l'a voulu.
+ */
+const LOW_LATENCY_TARGET_S = 3;
+const LOW_LATENCY_MAX_LATENCY_S = 15;
+const LOW_LATENCY_CATCH_UP_RATE = 1.05;
 
 export interface PlaybackStats {
   watchedMs: number;
@@ -53,6 +61,14 @@ export const HLS_CONFIG: Partial<Hls['config']> = {
   fragLoadingMaxRetry: 8,
 };
 
+/** Réglages « direct au plus près » : parties de segment, cible 3 s, rattrapage doux. */
+export const HLS_CONFIG_LOW_LATENCY: Partial<Hls['config']> = {
+  ...HLS_CONFIG,
+  liveSyncDuration: LOW_LATENCY_TARGET_S,
+  liveMaxLatencyDuration: LOW_LATENCY_MAX_LATENCY_S,
+  maxLiveSyncPlaybackRate: LOW_LATENCY_CATCH_UP_RATE,
+};
+
 export interface HlsPlayerState {
   /** Image arrêtée faute de données depuis plus de SPINNER_DELAY_MS. */
   stalled: boolean;
@@ -81,6 +97,7 @@ export function useHls(
   streamUrl: string | null,
   onSessionLost: () => void,
   onStats?: (stats: PlaybackStats) => void,
+  lowLatency = false,
 ): HlsPlayerState {
   const [stalled, setStalled] = useState(false);
   const [needsGesture, setNeedsGesture] = useState(false);
@@ -92,7 +109,7 @@ export function useHls(
   useEffect(() => {
     const video = videoRef.current;
     if (video === null || streamUrl === null) return;
-    const buffer = new AdaptiveBuffer();
+    const buffer = new AdaptiveBuffer(lowLatency ? ADAPTIVE_BUFFER_LOW_LATENCY : ADAPTIVE_BUFFER);
     let started = false;
     let watchedMs = 0;
     let lastReport = Date.now();
@@ -122,7 +139,7 @@ export function useHls(
         play();
         return;
       }
-      const instance = new Hls(HLS_CONFIG);
+      const instance = new Hls(lowLatency ? HLS_CONFIG_LOW_LATENCY : HLS_CONFIG);
       hls = instance;
       instance.on(Hls.Events.ERROR, (_event, data: ErrorData) => {
         if (!data.fatal) return;
@@ -141,8 +158,10 @@ export function useHls(
           instance.recoverMediaError();
           return;
         }
+        // Décodage impossible malgré les récupérations (format changé en cours de route) :
+        // une nouvelle session, adaptée à ce navigateur, plutôt que la même playlist.
         mediaRecoveries = 0;
-        create();
+        onSessionLost();
       });
       instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
         networkRetries = 0;
@@ -172,22 +191,28 @@ export function useHls(
     video.addEventListener('playing', onPlaying);
     video.addEventListener('timeupdate', onPlaying);
 
-    // Retard sur le direct construit en douceur (lecture à 97 % tant qu'il manque), vers une
-    // cible qui s'adapte à l'instabilité mesurée du réseau.
+    // Confort : retard sur le direct construit en douceur (lecture à 97 % tant qu'il manque),
+    // vers une cible qui s'adapte à l'instabilité du réseau. Direct au plus près : hls.js
+    // tient lui-même la cible (rattrapage à 105 %, cible allongée après un arrêt).
     const tick = setInterval(() => {
       const now = Date.now();
       const latency = hls?.latency ?? null;
       setLatencyS(latency);
       const targetS = buffer.targetS(now);
-      const rate = liveRate(
-        {
-          latencyS: latency !== null && Number.isFinite(latency) ? latency : null,
-          bufferAheadS: bufferAhead(video),
-          currentRate: video.playbackRate,
-        },
-        { ...LIVE_DELAY, targetS },
-      );
-      if (video.playbackRate !== rate) video.playbackRate = rate;
+      if (!lowLatency) {
+        const rate = liveRate(
+          {
+            latencyS: latency !== null && Number.isFinite(latency) ? latency : null,
+            bufferAheadS: bufferAhead(video),
+            currentRate: video.playbackRate,
+          },
+          { ...LIVE_DELAY, targetS },
+        );
+        if (video.playbackRate !== rate) video.playbackRate = rate;
+      } else if (hls !== null) {
+        // Cible LL-HLS pilotée elle aussi : 3 s, jusqu'à 8 s si le réseau peine (hls.js la relit).
+        hls.config.liveSyncDuration = targetS;
+      }
       // Téléchargement d'avance à la mesure du retard visé (pilotés, jamais figés : §6).
       if (hls !== null) hls.config.maxBufferLength = Math.max(MIN_BUFFER_AHEAD_S, targetS + BUFFER_MARGIN_S);
       if (started && !video.paused) watchedMs += LIVE_DELAY_TICK_MS;
@@ -230,7 +255,7 @@ export function useHls(
       video.removeAttribute('src');
       video.load();
     };
-  }, [videoRef, streamUrl, onSessionLost]);
+  }, [videoRef, streamUrl, onSessionLost, lowLatency]);
 
   return { stalled, needsGesture, latencyS };
 }

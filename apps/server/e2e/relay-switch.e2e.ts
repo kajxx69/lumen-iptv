@@ -143,10 +143,21 @@ test('bascule de source pendant la lecture : hls.js continue sans réinitialisat
   expect(started).toBe(true);
   await page.waitForTimeout(WARMUP_MS);
 
-  const cut = await fetch(`${FAKE_PORTAL_URL}/_chaos/drop`, {
+  // Coupe la source qui sert vraiment l'image : la fusion et le classement par santé peuvent
+  // avoir choisi un autre portail que A parmi ceux du serveur de test.
+  const serving = await page.evaluate(async (url) => {
+    const sessionId = url.split('/')[3] ?? '';
+    const status = (await (await fetch(`/api/playback/${sessionId}/status`)).json()) as {
+      activePortalId: string;
+    };
+    const portals = (await (await fetch('/api/portals')).json()) as { id: string; host: string }[];
+    return portals.find((p) => p.id === status.activePortalId)?.host ?? '';
+  }, streamUrl);
+  const servedByB = serving === new URL(FAKE_PORTAL_B_URL).host;
+  const cut = await fetch(`${servedByB ? FAKE_PORTAL_B_URL : FAKE_PORTAL_URL}/_chaos/drop`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ durationMs: 120_000, channelId: CHANNEL_A }),
+    body: JSON.stringify({ durationMs: 120_000, channelId: servedByB ? CHANNEL_B : CHANNEL_A }),
   });
   expect(cut.ok).toBe(true);
   const cutAt = await page.evaluate(() => performance.now());

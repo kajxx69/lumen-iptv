@@ -200,6 +200,53 @@ describe('relais : lecture de base', () => {
     expect((await d.srv.admin.get(`${pb.streamUrl}?_HLS_msn=${next + 50}`)).status).toBe(400);
   });
 
+  it('direct au plus près (LL-HLS) : parties annoncées, livrées dès leur parution', async () => {
+    const d = await dual();
+    const pb = await startPlayback(d.srv.admin, {
+      portalId: d.dtoA.id,
+      channelId: CHANNEL,
+      lowLatency: true,
+    });
+    // Laisser paraître quelques segments complets et leurs parties.
+    await waitFor(
+      '3 segments',
+      async () => ((await segmentsOf(d, pb)).length >= 3 ? true : undefined),
+      15_000,
+    );
+    const { text } = await readPlaylist(d.srv.admin, pb.streamUrl);
+    expect(text).toContain('#EXT-X-PART-INF:PART-TARGET=0.500');
+    expect(text).toMatch(/#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1\.500/);
+    const parts = [...text.matchAll(/#EXT-X-PART:DURATION=([\d.]+),URI="([^"]+)"/g)];
+    expect(parts.length).toBeGreaterThan(3);
+    for (const [, duration] of parts) expect(Number(duration)).toBeLessThanOrEqual(0.5);
+    const hint = /#EXT-X-PRELOAD-HINT:TYPE=PART,URI="seg\/(\d+)\.(\d+)\.ts"/.exec(text);
+    expect(hint).not.toBeNull();
+    const [, seq = '', part = ''] = hint ?? [];
+
+    // La partie annoncée n'existe pas encore : sa requête attend sa parution (≤ une partie).
+    const t0 = Date.now();
+    const bytes = await fetchSegment(
+      d.srv.admin,
+      `${d.srv.baseUrl}/api/playback/${pb.sessionId}/seg/${seq}.${part}.ts`,
+    );
+    const hintMs = Date.now() - t0;
+    console.log(`partie en préchargement servie après ${hintMs} ms`);
+    expect(bytes.length % 188).toBe(0);
+    expect(hintMs).toBeLessThan(1500);
+
+    // Rechargement bloquant sur la partie suivante : réponse à sa parution.
+    const t1 = Date.now();
+    const next = await d.srv.admin.get(`${pb.streamUrl}?_HLS_msn=${seq}&_HLS_part=${Number(part) + 1}`);
+    const blockedMs = Date.now() - t1;
+    console.log(`rechargement bloquant par partie : ${blockedMs} ms`);
+    expect(next.status).toBe(200);
+    expect(blockedMs).toBeLessThan(1500);
+
+    // Une session confort sur le même relais ne voit aucune partie.
+    const comfort = await startPlayback(d.srv.admin, { portalId: d.dtoA.id, channelId: CHANNEL });
+    expect((await readPlaylist(d.srv.admin, comfort.streamUrl)).text).not.toContain('EXT-X-PART');
+  });
+
   it('chaîne déjà relayée : un second spectateur démarre avec tout le tampon disponible', async () => {
     const d = await dual();
     const first = await play(d, false);

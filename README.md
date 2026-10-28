@@ -2,11 +2,11 @@
 
 Lecteur IPTV (Stalker Portal) centré sur la résilience. Voir [PROJECT.md](PROJECT.md) pour la spécification.
 
-**État : phase 6** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
+**État : phase 7** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
 comptes et chiffrement des portails (2), relais avec tampon glissant et bascule de source (3),
 client web : catalogue virtualisé, lecteur, guide des programmes, favoris (4), moteur de
 résilience : détection de panne à trois niveaux, score de santé, sondes, tampon adaptatif (5),
-agrégation multi-portails et dédoublonnage (6).
+agrégation multi-portails et dédoublonnage (6), transcodage adaptatif et LL-HLS (7).
 
 ## Prérequis
 
@@ -241,6 +241,61 @@ est favorite si l'une de ses sources l'est, et passer d'une vue à l'autre ne pe
 
 Variables : `LUMEN_GRID_CHECKS`, `LUMEN_GRID_CHECKS_PER_HOUR` (fenêtre :
 `LUMEN_PROBE_CATALOG_START_HOUR` / `_END_HOUR`).
+
+## Direct au plus près (LL-HLS)
+
+Deux façons de regarder, au choix du spectateur, chaîne par chaîne (bouton **⚡ Direct au plus
+près** sur l'écran de lecture, mémorisé sur l'appareil) :
+
+| Mode                | Retard sur le direct | Coupure amont de 15 s                | Pour…                          |
+| ------------------- | -------------------- | ------------------------------------ | ------------------------------ |
+| Confort (défaut)    | ≈ 20 s, jusqu'à 60 s | invisible                            | tout le reste                  |
+| Direct au plus près | 3 s, jusqu'à 8 s     | visible au bout de quelques secondes | le match, le direct qui compte |
+
+Le relais découpe chaque segment en **parties de 0,5 s** (`EXT-X-PART`, PAT et PMT en tête de
+chacune) ; la playlist d'une session « direct » les annonce, avec `PART-HOLD-BACK` (1,5 s),
+la partie suivante en indice de préchargement (`EXT-X-PRELOAD-HINT`) et le rechargement
+bloquant par partie (`_HLS_part`). La partie annoncée est servie dès qu'elle paraît. Les
+sessions confort, sur le même relais, ne voient aucune partie. Le format reste MPEG-TS de bout
+en bout (choix délibéré, écart à PROJECT.md qui suggérait fMP4 : le moteur de résilience, la
+bascule et le démarrage rapide reposent sur TS, que hls.js convertit à peu de frais).
+
+Mesuré (machine de test, portail factice) : confort à 26 s du direct, « direct au plus près »
+à **3 s** ; partie annoncée servie 0,4 s après la demande.
+
+## Transcodage adaptatif
+
+Le serveur ne convertit que ce que le navigateur ne lit pas (PROJECT.md §8) :
+
+| Flux amont       | Navigateur qui le lit             | Sinon                             |
+| ---------------- | --------------------------------- | --------------------------------- |
+| H.264, AAC, MP3  | tous : **copié tel quel**         | —                                 |
+| AC-3             | annoncé par le navigateur : copié | → AAC (peu coûteux, vidéo copiée) |
+| E-AC-3, AAC LATM | Safari natif (E-AC-3) : copié     | → AAC                             |
+| HEVC             | annoncé par le navigateur : copié | → H.264 (coûteux)                 |
+| MPEG-2           | aucun                             | → H.264 (coûteux)                 |
+
+- **Codecs** lus dans la PMT du flux (types de flux et descripteurs DVB), sans attendre
+  `ffprobe` : la décision est instantanée. **Capacités** du navigateur détectées par le client
+  (`MediaSource.isTypeSupported`, ou `canPlayType` en HLS natif) et transmises à la lecture.
+- **Une connexion amont** par chaîne : la sortie directe et chaque sortie convertie en sont
+  nourries ; une sortie convertie est partagée par tous les spectateurs qui en ont besoin, et
+  s'arrête avec le dernier. Amorcée avec le flux récent, elle démarre sans attendre d'image
+  clé (MPEG-2 + AC-3 → H.264 + AAC : 3 s sur la machine de test). Une bascule de source la
+  relance, jonction marquée.
+- **Accélération matérielle** : au démarrage, le serveur essaie NVENC, Quick Sync, AMF, VAAPI
+  puis VideoToolbox par un encodage d'essai, et garde le premier qui marche. Sinon, **repli
+  logiciel** (libx264) avec avertissement dans les journaux, image réduite à 720p, et
+  l'indicateur du lecteur précise « image convertie (qualité réduite) ». Conversions vidéo
+  simultanées plafonnées (`LUMEN_TRANSCODE_MAX_VIDEO`, 2) : au-delà, un refus clair, réessayé
+  automatiquement par le lecteur.
+- **Docker** : FFmpeg est dans l'image ; pour VAAPI, monter `/dev/dri` dans le conteneur ;
+  pour NVENC, le runtime NVIDIA.
+
+Variables : `LUMEN_TRANSCODING`, `LUMEN_TRANSCODE_ENCODER` (`auto`, `software` ou un nom
+d'encodeur), `LUMEN_TRANSCODE_MAX_VIDEO`, `LUMEN_TRANSCODE_MAX_HEIGHT`,
+`LUMEN_TRANSCODE_AUDIO_BITRATE_KBPS`, `LUMEN_RELAY_PART_TARGET_S`. Métriques :
+`lumen_transcodes_active`, `lumen_transcodes_video_active`, `lumen_transcode_hardware`.
 
 ## Arborescence
 

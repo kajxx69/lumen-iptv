@@ -20,9 +20,14 @@ const SEGMENT_CACHE_CONTROL = 'private, max-age=120, immutable';
 
 const SessionParams = z.object({ sessionId: z.string().min(1) });
 const ChannelParams = z.object({ portalId: z.string().min(1), channelId: z.string().min(1) });
-/** Rechargement bloquant (RFC 8216bis) : `_HLS_part` est ignoré, le relais ne publie pas de parties. */
-const BlockingQuery = z.object({ _HLS_msn: z.coerce.number().int().nonnegative().optional() });
-const SegmentParams = SessionParams.extend({ file: z.string().regex(/^\d{1,15}\.ts$/) });
+/** Rechargement bloquant (RFC 8216bis) : segment `_HLS_msn`, et sa partie `_HLS_part` en LL-HLS. */
+const BlockingQuery = z.object({
+  _HLS_msn: z.coerce.number().int().nonnegative().optional(),
+  _HLS_part: z.coerce.number().int().nonnegative().optional(),
+});
+/** `<n>.ts` : segment ; `<n>.<partie>.ts` : partie de segment (LL-HLS). */
+const SEGMENT_FILE = /^(\d{1,15})(?:\.(\d{1,4}))?\.ts$/;
+const SegmentParams = SessionParams.extend({ file: z.string().regex(SEGMENT_FILE) });
 
 export function registerPlaybackRoutes(app: FastifyInstance, playback: PlaybackService): void {
   app.post('/api/playback', async (req, reply) => {
@@ -33,8 +38,8 @@ export function registerPlaybackRoutes(app: FastifyInstance, playback: PlaybackS
   app.get('/api/playback/:sessionId/index.m3u8', async (req, reply) => {
     const user = requireUser(req);
     const { sessionId } = parseOr400(SessionParams, req.params);
-    const { _HLS_msn: msn } = parseOr400(BlockingQuery, req.query);
-    const text = await playback.playlist(user, sessionId, msn);
+    const { _HLS_msn: msn, _HLS_part: part } = parseOr400(BlockingQuery, req.query);
+    const text = await playback.playlist(user, sessionId, msn, part);
     // Playlist en direct : jamais en cache, elle change à chaque segment.
     return reply.header('Content-Type', HLS_CONTENT_TYPE).header('Cache-Control', 'no-store').send(text);
   });
@@ -46,10 +51,16 @@ export function registerPlaybackRoutes(app: FastifyInstance, playback: PlaybackS
     return reply.code(204).send();
   });
 
-  app.get('/api/playback/:sessionId/seg/:file', (req, reply) => {
+  app.get('/api/playback/:sessionId/seg/:file', async (req, reply) => {
     const user = requireUser(req);
     const { sessionId, file } = parseOr400(SegmentParams, req.params);
-    const data = playback.segment(user, sessionId, Number.parseInt(file, 10));
+    const [, seq = '', part] = SEGMENT_FILE.exec(file) ?? [];
+    const data = await playback.segment(
+      user,
+      sessionId,
+      Number.parseInt(seq, 10),
+      part === undefined ? undefined : Number.parseInt(part, 10),
+    );
     return reply
       .header('Content-Type', TS_CONTENT_TYPE)
       .header('Cache-Control', SEGMENT_CACHE_CONTROL)

@@ -78,6 +78,11 @@ export const ServerConfigSchema = z.object({
    */
   relayFastStartS: z.coerce.number().min(0).max(10).default(2),
   /**
+   * Parties de segment pour le « direct au plus près » (LL-HLS) : 0,5 s, soit une latence de
+   * 1,5 s côté relais (trois parties d'avance). 0 : LL-HLS désactivé.
+   */
+  relayPartTargetS: z.coerce.number().min(0).max(2).default(0.5),
+  /**
    * EXT-X-TARGETDURATION, figée pour la vie d'un relais (RFC 8216). Large pour absorber les
    * GOP longs de certaines chaînes ; au-delà, le relais coupe sans attendre d'image clé.
    */
@@ -124,6 +129,19 @@ export const ServerConfigSchema = z.object({
   /** Analyses FFmpeg simultanées pour tout le serveur : le reste attend son tour ou est sauté. */
   contentAnalysisMaxConcurrent: z.coerce.number().int().positive().default(2),
   ffmpegPath: z.string().default('ffmpeg'),
+
+  /**
+   * Transcodage (PROJECT.md §8) : seulement ce que le navigateur ne lit pas (HEVC, MPEG-2,
+   * AC-3…). Désactivé, une chaîne illisible est refusée avec un message clair.
+   */
+  transcoding: z.boolean().default(true),
+  /** `auto` : premier encodeur matériel qui marche, sinon libx264 ; `software` ; ou un nom précis. */
+  transcodeEncoder: z.string().min(1).default('auto'),
+  /** Transcodages vidéo simultanés au plus : la vidéo coûte cher (l'audio seul ne compte pas). */
+  transcodeMaxVideo: z.coerce.number().int().positive().default(2),
+  /** Image transcodée réduite à cette hauteur au plus : 720p, net sur un téléviseur, sobre en débit. */
+  transcodeMaxHeight: z.coerce.number().int().min(144).max(2160).default(720),
+  transcodeAudioBitrateKbps: z.coerce.number().int().positive().default(128),
 
   /** Sondes de fond : connaître l'état d'une chaîne avant que l'utilisateur ne clique dessus. */
   probes: z.boolean().default(true),
@@ -206,6 +224,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
     relaySegmentTargetS: 'RELAY_SEGMENT_TARGET_S',
     relayFirstSegmentTargetS: 'RELAY_FIRST_SEGMENT_TARGET_S',
     relayFastStartS: 'RELAY_FAST_START_S',
+    relayPartTargetS: 'RELAY_PART_TARGET_S',
     relayTargetDurationS: 'RELAY_TARGET_DURATION_S',
     relayStallTimeoutMs: 'RELAY_STALL_TIMEOUT_MS',
     relayStartTimeoutMs: 'RELAY_START_TIMEOUT_MS',
@@ -219,6 +238,10 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
     contentFailureS: 'CONTENT_FAILURE_S',
     contentAnalysisMaxConcurrent: 'CONTENT_ANALYSIS_MAX_CONCURRENT',
     ffmpegPath: 'FFMPEG_PATH',
+    transcodeEncoder: 'TRANSCODE_ENCODER',
+    transcodeMaxVideo: 'TRANSCODE_MAX_VIDEO',
+    transcodeMaxHeight: 'TRANSCODE_MAX_HEIGHT',
+    transcodeAudioBitrateKbps: 'TRANSCODE_AUDIO_BITRATE_KBPS',
     probeFavoritesIntervalMs: 'PROBE_FAVORITES_INTERVAL_MS',
     probeCatalogStartHour: 'PROBE_CATALOG_START_HOUR',
     probeCatalogEndHour: 'PROBE_CATALOG_END_HOUR',
@@ -242,6 +265,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
     ['contentDetection', 'CONTENT_DETECTION'],
     ['probes', 'PROBES'],
     ['gridChecks', 'GRID_CHECKS'],
+    ['transcoding', 'TRANSCODING'],
   ] as const) {
     const v = env[`LUMEN_${key}`];
     if (v !== undefined && v !== '') input[field] = bool(v);

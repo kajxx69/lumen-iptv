@@ -29,6 +29,7 @@ import { registerPlaybackRoutes } from './routes/playback-routes.js';
 import { registerPortalRoutes } from './routes/portal-routes.js';
 import { hashPassword } from './security/passwords.js';
 import { SecretBox } from './security/secret-box.js';
+import { TranscodeService } from './transcode/transcode-service.js';
 import { AuthStore } from './store/auth-store.js';
 import { CatalogStore } from './store/catalog-store.js';
 import { openDatabase } from './store/database.js';
@@ -111,7 +112,51 @@ export async function createServer(
     app.log,
   );
   const library = new LibraryStore(db);
-  const playback = new PlaybackService(registry, catalog, relays, library, health, merge, config, app.log);
+  const transcodes = config.transcoding
+    ? new TranscodeService(
+        {
+          ffmpegPath: config.ffmpegPath,
+          encoder: config.transcodeEncoder,
+          maxVideo: config.transcodeMaxVideo,
+          transcode: {
+            // Images clés au rythme des segments du relais : chaque segment transcodé démarre sur l'une d'elles.
+            keyframeIntervalS: config.relaySegmentTargetS,
+            maxHeight: config.transcodeMaxHeight,
+            audioBitrateKbps: config.transcodeAudioBitrateKbps,
+          },
+        },
+        relays.cache,
+        app.log,
+      )
+    : null;
+  if (transcodes !== null) {
+    metrics.gauge(
+      'lumen_transcodes_active',
+      'Sorties transcodées en cours (audio ou vidéo)',
+      () => transcodes.activeCount.all,
+    );
+    metrics.gauge(
+      'lumen_transcodes_video_active',
+      'Transcodages vidéo en cours (les plus coûteux, plafonnés)',
+      () => transcodes.activeCount.video,
+    );
+    metrics.gauge(
+      'lumen_transcode_hardware',
+      'Encodeur vidéo matériel en service (1) ou processeur (0)',
+      () => (transcodes.encoderChoice?.hardware === true ? 1 : 0),
+    );
+  }
+  const playback = new PlaybackService(
+    registry,
+    catalog,
+    relays,
+    library,
+    health,
+    merge,
+    transcodes,
+    config,
+    app.log,
+  );
   const probes = config.probes
     ? new ProbeWorker(
         new ProbeScheduler(

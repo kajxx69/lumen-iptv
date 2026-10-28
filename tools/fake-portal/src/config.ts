@@ -99,6 +99,12 @@ export const FakePortalConfigSchema = z.object({
       videoBitrateKbps: z.coerce.number().int().positive().default(1200),
       audioBitrateKbps: z.coerce.number().int().positive().default(96),
       audioSampleRate: z.coerce.number().int().positive().default(48_000),
+      /**
+       * Codecs diffusés : H.264 + AAC par défaut ; HEVC, MPEG-2 et AC-3 pour éprouver le
+       * transcodage (PROJECT.md §8). Une trame AC-3 (1 536 échantillons) tombe juste sur la boucle.
+       */
+      videoCodec: z.enum(['h264', 'hevc', 'mpeg2']).default('h264'),
+      audioCodec: z.enum(['aac', 'ac3']).default('aac'),
     })
     .prefault({}),
 
@@ -192,6 +198,15 @@ export function configFromEnv(env: NodeJS.ProcessEnv): FakePortalConfig {
     const v = read(key);
     if (v !== undefined && v !== '') input[field] = parseList(v);
   }
+  const media: Record<string, string> = {};
+  for (const [field, key] of [
+    ['videoCodec', 'VIDEO_CODEC'],
+    ['audioCodec', 'AUDIO_CODEC'],
+  ] as const) {
+    const v = read(key);
+    if (v !== undefined && v !== '') media[field] = v;
+  }
+  if (Object.keys(media).length > 0) input['media'] = media;
   const ffmpeg = env['FFMPEG_PATH'];
   if (ffmpeg !== undefined && ffmpeg !== '') input['ffmpegPath'] = ffmpeg;
   return FakePortalConfigSchema.parse(input);

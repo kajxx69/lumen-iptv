@@ -41,7 +41,10 @@ export function timestampDelta(from: number, to: number): number {
 }
 
 export const isVideoStream = (streamId: number): boolean => streamId >= 0xe0 && streamId <= 0xef;
-export const isAudioStream = (streamId: number): boolean => streamId >= 0xc0 && streamId <= 0xdf;
+/** MPEG audio et AAC (0xC0–0xDF), et AC-3 qui voyage en private_stream_1 (0xBD). */
+export const isAudioStream = (streamId: number): boolean =>
+  (streamId >= 0xc0 && streamId <= 0xdf) || streamId === PRIVATE_STREAM_1;
+const PRIVATE_STREAM_1 = 0xbd;
 
 export function assertAligned(buf: Uint8Array): void {
   if (buf.length % TS_PACKET_SIZE !== 0) {

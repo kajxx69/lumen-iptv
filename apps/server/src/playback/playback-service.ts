@@ -21,9 +21,14 @@ import type { Relay, RelaySource } from '../relay/relay.js';
 import type { RelayManager } from '../relay/relay-manager.js';
 import type { AuthUser } from '../store/auth-store.js';
 import type { LibraryStore } from '../store/library-store.js';
+import type { MediaOutput } from '../relay/media-output.js';
+import { PASSTHROUGH, planOutput } from '../transcode/plan.js';
+import type { TranscodeService } from '../transcode/transcode-service.js';
+import type { TranscodedOutput } from '../transcode/transcoded-output.js';
 
-/** URI des segments, relative à la playlist : `/api/playback/<id>/seg/<n>.ts`. */
-const segmentUri = (seq: number): string => `seg/${seq}.ts`;
+/** URI des segments et de leurs parties, relatives à la playlist : `seg/<n>.ts`, `seg/<n>.<partie>.ts`. */
+const segmentUri = (seq: number, part?: number): string =>
+  part === undefined ? `seg/${seq}.ts` : `seg/${seq}.${part}.ts`;
 /**
  * Attente maximale d'un rechargement bloquant. La RFC permet trois durées cibles (18 s) ;
  * 8 s restent sous le délai de chargement de playlist de hls.js (10 s), qui sinon
@@ -40,6 +45,12 @@ interface ViewerSession {
   lastSeen: number;
   /** Le lecteur a demandé sa première playlist : journalisé une fois, pas à chaque rechargement. */
   attached: boolean;
+  /** « Direct au plus près » : la playlist de cette session annonce les parties (LL-HLS). */
+  lowLatency: boolean;
+  /** Ce que lit ce spectateur : la sortie directe du relais, ou une sortie transcodée. */
+  output: MediaOutput;
+  transcoded: TranscodedOutput | null;
+  caps: PlaybackRequest['caps'];
   log: FastifyBaseLogger;
 }
 
@@ -58,6 +69,8 @@ export class PlaybackService {
     private readonly library: LibraryStore,
     private readonly health: HealthService,
     private readonly merge: MergeService,
+    /** Absent : transcodage désactivé, les formats illisibles sont refusés clairement. */
+    private readonly transcodes: TranscodeService | null,
     private readonly config: ServerConfig,
     private readonly log: FastifyBaseLogger,
   ) {
@@ -82,7 +95,18 @@ export class PlaybackService {
     const id = randomUUID();
     // Identifiant de corrélation : suit cette lecture de bout en bout dans les journaux.
     const log = this.log.child({ cid: id, relay: relay.id });
-    const session: ViewerSession = { id, userId: user.id, relay, lastSeen: Date.now(), attached: false, log };
+    const session: ViewerSession = {
+      id,
+      userId: user.id,
+      relay,
+      lastSeen: Date.now(),
+      attached: false,
+      lowLatency: request.lowLatency,
+      output: relay.output,
+      transcoded: null,
+      caps: request.caps,
+      log,
+    };
     this.sessions.set(id, session);
     try {
       await relay.ready(this.config.relayStartTimeoutMs);
@@ -92,6 +116,7 @@ export class PlaybackService {
       log.warn({ sources: sources.length }, 'lecture impossible : aucune source ne répond');
       throw new ApiError(502, 'stream_unavailable', 'la chaîne ne répond pas, sur aucune de ses sources');
     }
+    await this.chooseOutput(session, request.caps);
     log.info(
       { portal: request.portalId, channel: request.channelId, fallbacks: request.fallbacks.length },
       'lecture démarrée',
@@ -103,11 +128,72 @@ export class PlaybackService {
     return { sessionId: id, streamUrl: `/api/playback/${id}/index.m3u8`, format: 'hls' };
   }
 
+  /**
+   * Sortie de la session selon ce que le navigateur sait lire : le flux tel quel si possible,
+   * sinon une sortie transcodée (partagée avec les autres spectateurs du même besoin).
+   */
+  private async chooseOutput(session: ViewerSession, caps: PlaybackRequest['caps']): Promise<void> {
+    const streams = session.relay.programStreams;
+    const plan = streams === null ? PASSTHROUGH : planOutput(streams, caps);
+    if (plan.key === PASSTHROUGH.key) return;
+    const fail = (
+      status: number,
+      code: 'unsupported_codec' | 'stream_unavailable',
+      message: string,
+    ): never => {
+      this.sessions.delete(session.id);
+      this.relays.release(session.relay);
+      throw new ApiError(status, code, message);
+    };
+    if (this.transcodes === null) {
+      fail(
+        415,
+        'unsupported_codec',
+        'ce navigateur ne lit pas le format de cette chaîne, et la conversion est désactivée',
+      );
+      return;
+    }
+    let output: TranscodedOutput;
+    try {
+      output = await this.transcodes.acquire(session.relay, caps);
+    } catch (err) {
+      this.sessions.delete(session.id);
+      this.relays.release(session.relay);
+      throw err;
+    }
+    try {
+      await output.ready(this.config.relayStartTimeoutMs);
+    } catch {
+      this.transcodes.release(session.relay, output);
+      fail(502, 'stream_unavailable', 'la conversion de cette chaîne n’a pas démarré');
+    }
+    session.output = output.output;
+    session.transcoded = output;
+    session.log.info({ plan: plan.key, codecs: streams }, 'flux converti pour ce navigateur');
+  }
+
   status(user: AuthUser, sessionId: string): PlaybackStatusDto {
-    const relay = this.owned(user, sessionId).relay;
+    const session = this.owned(user, sessionId);
+    const relay = session.relay;
     const state = relay.state;
+    const t = session.transcoded;
+    const streams = relay.programStreams;
+    const plan = t?.plan ?? null;
     // Un relais fermé sous la session (arrêt du serveur) se présente comme en reprise.
-    return { state: state === 'closed' ? 'recovering' : state, ...relay.status };
+    return {
+      state: state === 'closed' ? 'recovering' : state,
+      ...relay.status,
+      transcode:
+        plan === null || plan.key === PASSTHROUGH.key
+          ? null
+          : {
+              video: plan.video,
+              audio: plan.audio,
+              hardware: this.transcodes?.encoderChoice?.hardware ?? false,
+            },
+      restartRequired:
+        t === null && streams !== null && planOutput(streams, session.caps).key !== PASSTHROUGH.key,
+    };
   }
 
   /**
@@ -137,7 +223,7 @@ export class PlaybackService {
    * Une chaîne fusionnée (« Tous les portails ») n'a que ses sources, toutes à égalité.
    */
   private async candidates(
-    request: PlaybackRequest,
+    request: ChannelRef & { fallbacks: readonly ChannelRef[] },
     limit = 1 + MAX_FALLBACK_SOURCES,
   ): Promise<ChannelRef[]> {
     if (request.portalId === ALL_PORTALS_ID) {
@@ -214,25 +300,37 @@ export class PlaybackService {
   }
 
   /**
-   * Playlist du relais. Avec `waitForSeq` (rechargement bloquant, `_HLS_msn`), la réponse
-   * attend que ce segment paraisse : le lecteur le reçoit à l'instant de sa publication.
+   * Playlist du relais. Avec `waitForSeq` (rechargement bloquant, `_HLS_msn`, et
+   * `_HLS_part` en LL-HLS), la réponse attend que ce segment ou cette partie paraisse : le
+   * lecteur le reçoit à l'instant de sa publication.
    */
-  async playlist(user: AuthUser, sessionId: string, waitForSeq?: number): Promise<string> {
+  async playlist(
+    user: AuthUser,
+    sessionId: string,
+    waitForSeq?: number,
+    waitForPart?: number,
+  ): Promise<string> {
     const session = this.owned(user, sessionId);
     if (!session.attached) {
       session.attached = true;
       session.log.info({ state: session.relay.state }, 'lecteur rattaché au relais');
     }
-    const relay = session.relay;
+    const output = session.output;
     if (waitForSeq !== undefined) {
       // Trop loin dans le futur : le lecteur se trompe (RFC 8216bis : 400).
-      if (waitForSeq > relay.nextSeq + MAX_BLOCKING_AHEAD_SEGMENTS) {
+      if (waitForSeq > output.nextSeq + MAX_BLOCKING_AHEAD_SEGMENTS) {
         throw new ApiError(400, 'bad_request', 'segment demandé trop loin dans le futur');
       }
-      await relay.waitForSegment(waitForSeq, BLOCKING_RELOAD_MAX_MS);
+      if (session.relay.state !== 'closed') {
+        await output.waitFor(
+          waitForSeq,
+          session.lowLatency ? waitForPart : undefined,
+          BLOCKING_RELOAD_MAX_MS,
+        );
+      }
       session.lastSeen = Date.now();
     }
-    return relay.playlist(segmentUri);
+    return output.playlist(segmentUri, session.lowLatency);
   }
 
   recordStats(user: AuthUser, sessionId: string, stats: PlaybackStatsRequest): void {
@@ -241,9 +339,19 @@ export class PlaybackService {
     this.relays.metrics.stallSeconds.inc({}, stats.stalledMs / 1000);
   }
 
-  segment(user: AuthUser, sessionId: string, seq: number): Buffer {
+  /**
+   * Segment, ou partie de segment (LL-HLS). La partie annoncée en indice de préchargement
+   * (PRELOAD-HINT) n'existe pas encore : la réponse attend sa publication.
+   */
+  async segment(user: AuthUser, sessionId: string, seq: number, part?: number): Promise<Buffer> {
     const session = this.owned(user, sessionId);
-    const data = session.relay.segment(seq);
+    const output = session.output;
+    let data = part === undefined ? output.segment(seq) : output.part(seq, part);
+    if (data === undefined && part !== undefined && seq === output.nextSeq) {
+      await output.waitFor(seq, part, BLOCKING_RELOAD_MAX_MS);
+      session.lastSeen = Date.now();
+      data = output.part(seq, part);
+    }
     if (data === undefined) throw notFound('segment');
     this.relays.metrics.bytesOut.inc({}, data.length);
     return data;
@@ -255,6 +363,7 @@ export class PlaybackService {
 
   private close(session: ViewerSession, reason: string): void {
     if (!this.sessions.delete(session.id)) return;
+    if (session.transcoded !== null) this.transcodes?.release(session.relay, session.transcoded);
     this.relays.release(session.relay);
     session.log.info({ reason }, 'lecture terminée');
   }
