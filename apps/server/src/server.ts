@@ -4,6 +4,7 @@ import { type Logger, type LoggerOptions, pino } from 'pino';
 import { CatalogService } from './catalog/catalog-service.js';
 import { GridChecker } from './catalog/grid-checker.js';
 import { MergeService } from './catalog/merge-service.js';
+import { VodCatalogService } from './catalog/vod-catalog-service.js';
 import type { ServerConfig } from './config.js';
 import { installAuth } from './http/auth.js';
 import { installErrorHandlers } from './http/errors.js';
@@ -22,6 +23,10 @@ import { relayManagerOptions } from './relay/relay-options.js';
 import { registerAuthRoutes } from './routes/auth-routes.js';
 import { registerLibraryRoutes } from './routes/library-routes.js';
 import { registerMergeRoutes } from './routes/merge-routes.js';
+import { registerVodPlaybackRoutes, registerVodRoutes } from './routes/vod-routes.js';
+import { VodSourceProxy } from './vod/source-proxy.js';
+import { vodPlaybackOptions } from './vod/vod-options.js';
+import { VodPlaybackService } from './vod/vod-service.js';
 import { registerWebRoutes } from './routes/web-routes.js';
 import { LibraryStore } from './store/library-store.js';
 import { registerMetricsRoute } from './routes/metrics-route.js';
@@ -35,6 +40,8 @@ import { CatalogStore } from './store/catalog-store.js';
 import { openDatabase } from './store/database.js';
 import { MergeStore } from './store/merge-store.js';
 import { PortalStore } from './store/portal-store.js';
+import { ProgressStore } from './store/progress-store.js';
+import { VodStore } from './store/vod-store.js';
 
 export interface LumenServer {
   app: FastifyInstance;
@@ -90,6 +97,10 @@ export async function createServer(
   const catalogStore = new CatalogStore(db);
   const catalog = new CatalogService(catalogStore, registry, config, app.log);
   const portalHealth = new PortalHealth(registry, catalogStore);
+  const vod = new VodCatalogService(
+    { ttlMs: config.vodCatalogTtlMs, seriesCacheTtlMs: config.vodSeriesCacheTtlMs },
+    { store: new VodStore(db), registry, portalIds: () => portalStore.list().map((p) => p.id), log: app.log },
+  );
   const mergeStore = new MergeStore(db);
   const merge = new MergeService(mergeStore, catalogStore);
   const metrics = new MetricsRegistry();
@@ -155,6 +166,19 @@ export async function createServer(
     config,
     app.log,
   );
+  const vodProxy = new VodSourceProxy(
+    { connectTimeoutMs: config.upstreamTimeoutMs, retryDeadlineMs: config.vodUpstreamRetryDeadlineMs },
+    app.log,
+  );
+  await vodProxy.listen();
+  const vodPlayback = new VodPlaybackService(vodPlaybackOptions(config), {
+    vod,
+    registry,
+    proxy: vodProxy,
+    transcodes,
+    log: app.log,
+  });
+  metrics.gauge('lumen_vod_sessions_active', 'Lectures de films en cours', () => vodPlayback.activeCount);
   const probes = config.probes
     ? new ProbeWorker(
         new ProbeScheduler(
@@ -218,7 +242,9 @@ export async function createServer(
   registerPortalRoutes(app, { store: portalStore, registry, catalog, config, health: portalHealth, merge });
   registerMergeRoutes(app, { merge, store: mergeStore, registry });
   registerPlaybackRoutes(app, playback);
-  registerLibraryRoutes(app, { library, catalog, merge });
+  registerLibraryRoutes(app, { library, catalog, merge, progress: new ProgressStore(db), registry });
+  registerVodRoutes(app, { vod, registry, config });
+  registerVodPlaybackRoutes(app, vodPlayback);
   registerMetricsRoute(app, metrics, config);
   app.get('/api/health', () => Promise.resolve({ status: 'ok' }));
   await registerWebRoutes(app, config.webRoot);
@@ -238,6 +264,8 @@ export async function createServer(
       probes?.stop();
       gridChecks?.stop();
       playback.closeAll();
+      vodPlayback.closeAll();
+      await vodProxy.close();
       relays.closeAll();
       registry.closeAll();
       await app.close();

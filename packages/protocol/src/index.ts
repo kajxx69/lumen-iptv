@@ -23,6 +23,8 @@ export const ErrorCode = z.enum([
   // Conversion vidéo saturée sur le serveur, ou format illisible par ce navigateur sans conversion.
   'transcode_busy',
   'unsupported_codec',
+  /** Film ou épisode introuvable chez le portail, ou fichier illisible. */
+  'vod_unavailable',
   'internal',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
@@ -192,25 +194,95 @@ export const EPG_BATCH_MAX_CHANNELS = 40;
 export const EpgBatchDto = z.record(z.string(), z.array(EpgEntryDto));
 export type EpgBatchDto = z.infer<typeof EpgBatchDto>;
 
-export const VodDto = z.object({
+// --- Films et séries ---
+
+/** Le même titre sur un autre portail (vue « Tous les portails ») : essayé si le premier échoue. */
+export const VodSourceDto = z.object({ portalId: z.string(), id: z.string() });
+export type VodSourceDto = z.infer<typeof VodSourceDto>;
+
+export const MovieSummaryDto = z.object({
   id: z.string(),
   name: z.string(),
-  description: z.string(),
   year: z.number().nullable(),
-  durationMin: z.number().nullable(),
   rating: z.number().nullable(),
+  durationMin: z.number().nullable(),
   categoryId: z.string(),
+  /** Affiche servie par Lumen (jamais l'adresse du portail) ; null : aucune. */
+  poster: z.string().nullable(),
   censored: z.boolean(),
+  /** Vue « Tous les portails » : chaque portail qui propose ce film, le préféré d'abord. */
+  sources: z.array(VodSourceDto).optional(),
 });
-export type VodDto = z.infer<typeof VodDto>;
+export type MovieSummaryDto = z.infer<typeof MovieSummaryDto>;
 
-export const VodPageDto = z.object({
-  page: z.number(),
-  pageSize: z.number(),
-  totalItems: z.number(),
-  items: z.array(VodDto),
+export const SeriesSummaryDto = z.object({
+  id: z.string(),
+  name: z.string(),
+  year: z.number().nullable(),
+  categoryId: z.string(),
+  poster: z.string().nullable(),
+  censored: z.boolean(),
+  sources: z.array(VodSourceDto).optional(),
 });
-export type VodPageDto = z.infer<typeof VodPageDto>;
+export type SeriesSummaryDto = z.infer<typeof SeriesSummaryDto>;
+
+/**
+ * Catalogue de films ou de séries d'un portail. Les grands portails se parcourent page par
+ * page, lentement : tant que `complete` est faux, la liste grandit et le client la relit.
+ */
+const vodList = <T extends z.ZodType>(item: T) =>
+  z.object({
+    portalId: z.string(),
+    version: z.string(),
+    syncedAt: z.number(),
+    complete: z.boolean(),
+    categories: z.array(GenreDto),
+    items: z.array(item),
+  });
+export const MovieListDto = vodList(MovieSummaryDto);
+export type MovieListDto = z.infer<typeof MovieListDto>;
+export const SeriesListDto = vodList(SeriesSummaryDto);
+export type SeriesListDto = z.infer<typeof SeriesListDto>;
+
+export const MovieDetailDto = MovieSummaryDto.extend({
+  originalName: z.string(),
+  description: z.string(),
+  director: z.string(),
+  actors: z.string(),
+});
+export type MovieDetailDto = z.infer<typeof MovieDetailDto>;
+
+export const SeasonDto = z.object({
+  id: z.string(),
+  number: z.number(),
+  name: z.string(),
+  episodeCount: z.number(),
+});
+export type SeasonDto = z.infer<typeof SeasonDto>;
+
+export const SeriesDetailDto = SeriesSummaryDto.extend({
+  description: z.string(),
+  seasons: z.array(SeasonDto),
+});
+export type SeriesDetailDto = z.infer<typeof SeriesDetailDto>;
+
+export const EpisodeDto = z.object({ id: z.string(), number: z.number(), name: z.string() });
+export type EpisodeDto = z.infer<typeof EpisodeDto>;
+
+const VodId = z.string().min(1).max(128);
+
+/** Ce qu'on lit : un film, ou un épisode désigné par sa série et sa saison. */
+export const VodItemRef = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('movie'), portalId: VodId, movieId: VodId }),
+  z.object({
+    kind: z.literal('episode'),
+    portalId: VodId,
+    seriesId: VodId,
+    seasonId: VodId,
+    episodeId: VodId,
+  }),
+]);
+export type VodItemRef = z.infer<typeof VodItemRef>;
 
 // --- Lecture ---
 
@@ -336,3 +408,88 @@ export type RecentDto = z.infer<typeof RecentDto>;
 
 /** Chaînes récentes gardées par utilisateur : de quoi remplir l'accueil, pas un historique. */
 export const RECENTS_MAX = 20;
+
+// --- Lecture de films et d'épisodes ---
+
+/**
+ * Origine des horodatages muraux (EXT-X-PROGRAM-DATE-TIME) d'une playlist de film : chaque
+ * segment y porte sa position dans le film, comptée à partir de cette date. Le lecteur
+ * retrouve ainsi la position exacte quelle que soit la reprise. Pas 1970 : une date nulle
+ * se confond avec « absente » chez certains lecteurs.
+ */
+export const VOD_TIMELINE_EPOCH_MS = Date.UTC(2000, 0, 1);
+
+export const VodPlayRequest = z.object({
+  item: VodItemRef,
+  /** Position de départ dans le film (s) : reprise, ou saut au-delà de ce qui est chargé. */
+  startS: z.number().min(0).default(0),
+  caps: ClientCapabilities.default({ hevc: false, ac3: false, eac3: false }),
+  quality: QualityProfile.default('source'),
+  /** Piste audio (indice parmi `audioTracks`) ; absente : celle que le fichier désigne par défaut. */
+  audioTrack: z.number().int().min(0).max(64).optional(),
+  /** Lecture remplacée (saut, changement de piste) : fermée d'abord, pour libérer la connexion au portail. */
+  replaces: z.string().max(64).optional(),
+});
+export type VodPlayRequest = z.input<typeof VodPlayRequest>;
+/** Requête validée, valeurs par défaut appliquées : ce que reçoit le serveur. */
+export type VodPlayRequestParsed = z.output<typeof VodPlayRequest>;
+
+export const VodAudioTrackDto = z.object({
+  index: z.number(),
+  language: z.string().nullable(),
+  label: z.string(),
+});
+export type VodAudioTrackDto = z.infer<typeof VodAudioTrackDto>;
+
+export const VodPlaybackDto = z.object({
+  sessionId: z.string(),
+  playlistUrl: z.string(),
+  /** Durée du film (s) ; null si le fichier ne la donne pas. */
+  durationS: z.number().nullable(),
+  startS: z.number(),
+  audioTracks: z.array(VodAudioTrackDto),
+  audioTrack: z.number(),
+  transcode: z.object({ video: z.boolean(), audio: z.boolean() }),
+  quality: QualityProfile,
+});
+export type VodPlaybackDto = z.infer<typeof VodPlaybackDto>;
+
+// --- Reprise de lecture (synchronisée entre appareils) ---
+
+export const ProgressKind = z.enum(['movie', 'episode']);
+export type ProgressKind = z.infer<typeof ProgressKind>;
+
+const ProgressFields = {
+  kind: ProgressKind,
+  portalId: z.string().min(1).max(128),
+  /** Film, ou épisode. */
+  itemId: z.string().min(1).max(128),
+  seriesId: z.string().min(1).max(128).nullable(),
+  seasonId: z.string().min(1).max(128).nullable(),
+  positionS: z.number().min(0),
+  durationS: z.number().min(0),
+  /** Repère lisible d'un épisode (« S2 · É5 — Titre ») : l'accueil l'affiche sans rien demander au portail. */
+  label: z.string().max(200).nullable(),
+};
+
+export const ProgressUpdateRequest = z.object(ProgressFields);
+export type ProgressUpdateRequest = z.infer<typeof ProgressUpdateRequest>;
+
+export const ProgressDto = z.object({ ...ProgressFields, finished: z.boolean(), updatedAt: z.number() });
+export type ProgressDto = z.infer<typeof ProgressDto>;
+
+/** Positions gardées par utilisateur : les plus récentes ; de quoi reprendre, pas un historique complet. */
+export const PROGRESS_MAX = 200;
+/**
+ * Un titre est « vu » passé cette part de sa durée, ou, s'il est long, à moins de ce temps
+ * de la fin (le générique) : il quitte « Reprendre », et une série passe à l'épisode suivant.
+ */
+export const FINISHED_RATIO = 0.95;
+export const FINISHED_REMAINING_S = 180;
+/** En deçà, la règle du générique ne s'applique pas : trois minutes seraient presque tout le titre. */
+export const FINISHED_REMAINING_MIN_DURATION_S = 20 * 60;
+
+export const isFinished = (positionS: number, durationS: number): boolean =>
+  durationS > 0 &&
+  (positionS >= durationS * FINISHED_RATIO ||
+    (durationS >= FINISHED_REMAINING_MIN_DURATION_S && durationS - positionS <= FINISHED_REMAINING_S));

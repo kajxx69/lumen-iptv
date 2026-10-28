@@ -7,12 +7,17 @@ import { GuideScreen } from './screens/GuideScreen.js';
 import { HomeScreen } from './screens/HomeScreen.js';
 import { LiveScreen } from './screens/LiveScreen.js';
 import { LoginScreen } from './screens/LoginScreen.js';
+import { MovieScreen } from './screens/MovieScreen.js';
+import { SearchScreen } from './screens/SearchScreen.js';
+import { SeriesScreen } from './screens/SeriesScreen.js';
 import { SettingsScreen } from './screens/SettingsScreen.js';
+import { VodScreen } from './screens/VodScreen.js';
 /**
  * Le lecteur (hls.js, le plus gros module) n'est téléchargé qu'au lancement d'une chaîne :
  * l'ouverture de l'application coûte moitié moins de données mobiles.
  */
 const WatchScreen = lazy(() => import('./screens/WatchScreen.js').then((m) => ({ default: m.WatchScreen })));
+const PlayScreen = lazy(() => import('./screens/PlayScreen.js').then((m) => ({ default: m.PlayScreen })));
 import { type Route, goBack, navigate, useRouter } from './state/router.js';
 import { useCurrentPortal } from './state/use-current-portal.js';
 import { usePrefs } from './state/prefs.js';
@@ -37,8 +42,14 @@ const TABS: { label: string; route: Route }[] = [
   { label: 'Accueil', route: { name: 'home' } },
   { label: 'TV en direct', route: { name: 'tv', genre: null } },
   { label: 'Guide', route: { name: 'guide', genre: null } },
+  { label: 'Films', route: { name: 'movies', category: null } },
+  { label: 'Séries', route: { name: 'series', category: null } },
+  { label: 'Recherche', route: { name: 'search', query: '' } },
   { label: 'Réglages', route: { name: 'settings' } },
 ];
+
+/** Onglet allumé : une fiche appartient à sa rubrique. */
+const TAB_OF: Partial<Record<Route['name'], Route['name']>> = { movie: 'movies', show: 'series' };
 
 const MINUTE_MS = 60_000;
 
@@ -78,7 +89,7 @@ function Header({ current }: { current: Route['name'] }) {
           type="button"
           className="nav-link"
           data-nav
-          aria-current={current === tab.route.name ? 'page' : undefined}
+          aria-current={(TAB_OF[current] ?? current) === tab.route.name ? 'page' : undefined}
           onClick={() => {
             navigate(tab.route);
           }}
@@ -124,6 +135,23 @@ function Screen({ route }: { route: Route }) {
           <WatchScreen key="watch" portalId={route.portalId} channelId={route.channelId} />
         </Suspense>
       );
+    case 'movies':
+      return <VodScreen key="movies" kind="movie" category={route.category} />;
+    case 'series':
+      return <VodScreen key="series" kind="series" category={route.category} />;
+    case 'movie':
+      return <MovieScreen portalId={route.portalId} movieId={route.movieId} />;
+    case 'show':
+      return <SeriesScreen portalId={route.portalId} seriesId={route.seriesId} seasonId={route.seasonId} />;
+    case 'search':
+      return <SearchScreen query={route.query} />;
+    case 'play':
+      return (
+        <Suspense fallback={<div className="player" />}>
+          {/* Autre titre (épisode suivant) : écran remonté, tout son état repart de zéro. */}
+          <PlayScreen key={JSON.stringify(route.item)} item={route.item} startS={route.startS} />
+        </Suspense>
+      );
     case 'login':
       return <LoginScreen />;
   }
@@ -151,7 +179,7 @@ export function App() {
 
   if (me.isLoading) return <div className="empty">Lumen…</div>;
   if (loggedOut || route.name === 'login') return <LoginScreen />;
-  if (route.name === 'watch') return <Screen route={route} />;
+  if (route.name === 'watch' || route.name === 'play') return <Screen route={route} />;
   return (
     <div className="app">
       <Header current={route.name} />

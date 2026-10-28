@@ -212,8 +212,28 @@ export function registerStreamRoutes(app: FastifyInstance, deps: StreamDeps): vo
     return reply;
   });
 
-  /** Un film est la boucle de mire, une fois, avec des horodatages partant de zéro. */
+  /**
+   * Films déjà rendus : un lecteur VOD rouvre le fichier à chaque saut (requêtes Range), et
+   * le rendu complet coûte plusieurs secondes de processeur. Les pannes de contenu (écran
+   * noir, gel) visent les chaînes en direct ; un film ne dépend que de son identifiant.
+   */
+  const movies = new Map<string, Buffer>();
+  const MOVIES_KEPT = 4;
+
   function renderMovie(streamId: string): Buffer {
+    const hit = movies.get(streamId);
+    if (hit !== undefined) return hit;
+    const body = renderMovieOnce(streamId);
+    movies.set(streamId, body);
+    for (const old of movies.keys()) {
+      if (movies.size <= MOVIES_KEPT) break;
+      movies.delete(old);
+    }
+    return body;
+  }
+
+  /** Un film est la boucle de mire, une fois, avec des horodatages partant de zéro. */
+  function renderMovieOnce(streamId: string): Buffer {
     const continuity = new ContinuityRewriter();
     const count = config.media.loopDurationS / config.media.segmentDurationS;
     const parts: Buffer[] = [];

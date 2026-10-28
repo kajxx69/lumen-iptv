@@ -8,7 +8,6 @@ import {
   type EpgEntryDto,
   type PortalDto,
   type PortalHealthDto,
-  type VodPageDto,
 } from '@lumen/protocol';
 import type { PortalHealth } from '../portals/portal-health.js';
 import type { FastifyInstance } from 'fastify';
@@ -20,6 +19,7 @@ import { requireAdmin, requireUser } from '../http/auth.js';
 import { ApiError, fromStalker, notFound, parseOr400 } from '../http/errors.js';
 import type { PortalRegistry } from '../portals/registry.js';
 import type { PortalRecord, PortalStore } from '../store/portal-store.js';
+import { sendPortalImage } from './image-proxy.js';
 
 const MAC_VISIBLE_OCTETS = 2;
 const HOUR_MS = 3_600_000;
@@ -48,11 +48,6 @@ const EpgBatchQuery = EpgQuery.extend({
     .string()
     .transform((s) => [...new Set(s.split(',').filter((id) => id !== ''))])
     .pipe(z.array(z.string().max(64)).min(1).max(EPG_BATCH_MAX_CHANNELS)),
-});
-const VodQuery = z.object({
-  page: z.coerce.number().int().min(1).default(1),
-  category: z.string().default('*'),
-  search: z.string().max(100).optional(),
 });
 
 interface PortalRouteDeps {
@@ -161,24 +156,10 @@ export function registerPortalRoutes(
     const { portalId, channelId } = parseOr400(ChannelParams, req.params);
     const channel = await catalog.channel(portalId, channelId);
     if (channel?.logo == null) throw notFound('logo');
-    const portal = registry.get(portalId);
-    const url = channel.logo.startsWith('/') ? `${portal.origin}${channel.logo}` : channel.logo;
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        headers: { 'User-Agent': portal.userAgent },
-        signal: AbortSignal.timeout(config.upstreamTimeoutMs),
-      });
-    } catch {
-      throw notFound('logo');
-    }
-    const type = res.headers.get('content-type') ?? '';
-    // Seules des images passent : le proxy de logos ne doit pas servir n'importe quel contenu.
-    if (!res.ok || !type.startsWith('image/')) throw notFound('logo');
-    return reply
-      .header('Content-Type', type)
-      .header('Cache-Control', `private, max-age=${config.logoCacheMaxAgeS}`)
-      .send(Buffer.from(await res.arrayBuffer()));
+    return sendPortalImage(reply, registry.get(portalId), channel.logo, 'logo', {
+      upstreamTimeoutMs: config.upstreamTimeoutMs,
+      cacheMaxAgeS: config.logoCacheMaxAgeS,
+    });
   });
 
   app.get('/api/portals/:portalId/channels/:channelId/epg', async (req): Promise<EpgEntryDto[]> => {
@@ -214,32 +195,6 @@ export function registerPortalRoutes(
       }),
     );
     return Object.fromEntries(channels.map((id, i) => [id, lists[i] ?? []]));
-  });
-
-  app.get('/api/portals/:portalId/vod', async (req): Promise<VodPageDto> => {
-    requireUser(req);
-    const { portalId } = parseOr400(PortalParams, req.params);
-    const query = parseOr400(VodQuery, req.query);
-    const page = await registry.get(portalId).provider.client.getVodPage({
-      page: query.page,
-      category: query.category,
-      ...(query.search === undefined ? {} : { search: query.search }),
-    });
-    return {
-      page: query.page,
-      pageSize: page.pageSize,
-      totalItems: page.totalItems,
-      items: page.items.map((m) => ({
-        id: m.id,
-        name: m.name,
-        description: m.description,
-        year: m.year,
-        durationMin: m.durationMin,
-        rating: m.rating,
-        categoryId: m.categoryId,
-        censored: m.censored,
-      })),
-    };
   });
 
   /**

@@ -90,6 +90,41 @@ const MIGRATIONS: readonly string[] = [
     value TEXT NOT NULL
   );
   `,
+  // Films et séries (catalogue par portail), et positions de reprise de chaque compte.
+  `
+  CREATE TABLE vod_meta (
+    portal_id TEXT NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('movie', 'series')),
+    version TEXT NOT NULL,
+    synced_at INTEGER NOT NULL,
+    categories TEXT NOT NULL,
+    PRIMARY KEY (portal_id, kind)
+  );
+  CREATE TABLE vod_items (
+    portal_id TEXT NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (portal_id, kind, item_id)
+  );
+  CREATE INDEX vod_items_order ON vod_items (portal_id, kind, position);
+  CREATE TABLE progress (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    portal_id TEXT NOT NULL REFERENCES portals(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('movie', 'episode')),
+    item_id TEXT NOT NULL,
+    series_id TEXT,
+    season_id TEXT,
+    position_s REAL NOT NULL,
+    duration_s REAL NOT NULL,
+    label TEXT,
+    finished INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, portal_id, kind, item_id)
+  );
+  CREATE INDEX progress_by_user ON progress (user_id, updated_at);
+  `,
 ];
 
 export function openDatabase(path: string): Db {

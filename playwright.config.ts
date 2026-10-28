@@ -47,7 +47,14 @@ export default defineConfig({
       url: `${FAKE_PORTAL_URL}/_health`,
       reuseExistingServer: !process.env['CI'],
       timeout: WEB_SERVER_START_TIMEOUT_MS,
-      env: { FAKE_PORTAL_PORT: String(FAKE_PORTAL_PORT), FAKE_PORTAL_HOST: '127.0.0.1' },
+      env: {
+        FAKE_PORTAL_PORT: String(FAKE_PORTAL_PORT),
+        FAKE_PORTAL_HOST: '127.0.0.1',
+        // Catalogues de films et séries modestes : lus en quelques secondes, sans accaparer
+        // les appels au portail dont les scénarios de bascule ont besoin.
+        FAKE_PORTAL_VOD_COUNT: '120',
+        FAKE_PORTAL_SERIES_COUNT: '24',
+      },
     },
     {
       command: 'pnpm --filter @lumen/fake-portal start',
@@ -62,6 +69,8 @@ export default defineConfig({
         FAKE_PORTAL_CHANNEL_COUNT: '50',
         // Autre façon de nommer les mêmes chaînes (« Nova TV France 1080 ») : la fusion doit s'en sortir.
         FAKE_PORTAL_NAMING_STYLE: 'plain',
+        FAKE_PORTAL_VOD_COUNT: '60',
+        FAKE_PORTAL_SERIES_COUNT: '12',
       },
     },
     {
@@ -77,6 +86,8 @@ export default defineConfig({
         FAKE_PORTAL_CHANNEL_COUNT: '10',
         FAKE_PORTAL_VIDEO_CODEC: 'mpeg2',
         FAKE_PORTAL_AUDIO_CODEC: 'ac3',
+        FAKE_PORTAL_VOD_COUNT: '20',
+        FAKE_PORTAL_SERIES_COUNT: '6',
       },
     },
     {

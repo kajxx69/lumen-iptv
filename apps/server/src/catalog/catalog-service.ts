@@ -14,7 +14,7 @@ export interface SyncResult {
 }
 
 /** Logo stocké sans l'adresse du portail quand il est servi par lui (voir StoredChannel). */
-function storableLogo(logo: string, portalOrigin: string): string | null {
+export function storableLogo(logo: string, portalOrigin: string): string | null {
   if (logo.trim() === '') return null;
   return logo.startsWith(`${portalOrigin}/`) ? logo.slice(portalOrigin.length) : logo;
 }

@@ -506,10 +506,19 @@ button {
   justify-content: space-between;
   background: linear-gradient(#000c, transparent 25%, transparent 60%, #000d);
   transition: opacity 0.3s;
+  /* Le milieu laisse passer les clics (messages du lecteur, épisode suivant) ; seules les barres les prennent. */
+  pointer-events: none;
 }
 
-.overlay.hidden {
+.overlay > * {
+  pointer-events: auto;
+}
+
+/* Commandes masquées : elles ne prennent plus aucun clic. */
+.overlay.hidden,
+.overlay.hidden > * {
   opacity: 0;
+  pointer-events: none;
 }
 
 .overlay-top,
@@ -704,5 +713,259 @@ button {
 
   .overlay {
     transition: none;
+  }
+}
+
+/* --- Films et séries --- */
+
+.poster-grid {
+  padding: 12px;
+}
+
+.poster-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: grid;
+}
+
+.poster-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.poster-frame {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.poster {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.poster-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 10px;
+  color: var(--text-dim);
+  font-weight: 600;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.poster-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  background: rgb(0 0 0 / 60%);
+}
+
+.poster-progress span,
+.detail-progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.poster-title,
+.poster-subtitle {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.poster-subtitle {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.poster-tile:hover .poster-frame,
+.poster-tile:focus .poster-frame {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.poster-strip {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 150px;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 4px 4px 12px;
+}
+
+.detail {
+  display: grid;
+  grid-template-columns: minmax(160px, 280px) 1fr;
+  gap: 24px;
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.detail-poster {
+  aspect-ratio: 2 / 3;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.detail-body h1 {
+  margin: 0 0 6px;
+  font-size: 1.6rem;
+}
+
+.detail-facts {
+  color: var(--text-dim);
+}
+
+.detail-text {
+  max-width: 70ch;
+  line-height: 1.5;
+}
+
+.detail-credits {
+  color: var(--text-dim);
+}
+
+.detail-progress {
+  max-width: 420px;
+  height: 4px;
+  margin-top: 12px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.season-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 18px 0 8px;
+}
+
+.season-tabs .genre {
+  width: auto;
+}
+
+.season-tabs .genre[aria-selected='true'] {
+  color: var(--text);
+  background: var(--bg-raised);
+}
+
+.episodes {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.episode {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.episode:hover {
+  background: var(--bg-hover);
+}
+
+.search-screen {
+  padding: 0 20px 40px;
+  overflow-y: auto;
+}
+
+.search-screen h2 {
+  margin: 20px 0 10px;
+  font-size: 1.1rem;
+  color: var(--text-dim);
+}
+
+.vod-controls {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.seekbar {
+  position: relative;
+  height: 8px;
+  border-radius: 4px;
+  background: rgb(255 255 255 / 20%);
+  cursor: pointer;
+}
+
+.seekbar:focus {
+  height: 12px;
+}
+
+.seekbar-buffered,
+.seekbar-played {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: inherit;
+}
+
+.seekbar-buffered {
+  background: rgb(255 255 255 / 30%);
+}
+
+.seekbar-played {
+  background: var(--accent);
+}
+
+.vod-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.vod-clock {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 720px) {
+  .detail {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-poster {
+    max-width: 220px;
+  }
+
+  .poster-strip {
+    grid-auto-columns: 120px;
   }
 }

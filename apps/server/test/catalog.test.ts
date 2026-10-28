@@ -3,7 +3,7 @@ import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
-import type { ChannelListDto, EpgEntryDto, GenreDto, PortalHealthDto, VodPageDto } from '@lumen/protocol';
+import type { ChannelListDto, EpgEntryDto, GenreDto, PortalHealthDto } from '@lumen/protocol';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   ADMIN,
@@ -115,13 +115,6 @@ describe('catalogue à travers le backend', () => {
     expect(
       (await stack.srv.admin.get(`${base}/channels/7/epg?from=${now}&to=${now + 30 * 24 * HOUR}`)).status,
     ).toBe(400);
-  });
-
-  it('VOD : page avec recherche', async () => {
-    const res = await stack.srv.admin.get<VodPageDto>(`${base}/vod?page=1`);
-    expect(res.body).toMatchObject({ page: 1, pageSize: 14, totalItems: 1500 });
-    expect(res.body.items).toHaveLength(14);
-    expect(res.text).not.toContain('/media/');
   });
 
   it('portail inconnu : 404', async () => {

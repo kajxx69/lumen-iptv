@@ -2,12 +2,14 @@
 
 Lecteur IPTV (Stalker Portal) centré sur la résilience. Voir [PROJECT.md](PROJECT.md) pour la spécification.
 
-**État : phase 8** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
+**État : phase 9** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
 comptes et chiffrement des portails (2), relais avec tampon glissant et bascule de source (3),
 client web : catalogue virtualisé, lecteur, guide des programmes, favoris (4), moteur de
 résilience : détection de panne à trois niveaux, score de santé, sondes, tampon adaptatif (5),
 agrégation multi-portails et dédoublonnage (6), transcodage adaptatif et LL-HLS (7), adaptation
-au réseau : qualité automatique, économie de données, compteur de consommation (8).
+au réseau : qualité automatique, économie de données, compteur de consommation (8), films et
+séries : catalogue, fiches, lecture avec reprise synchronisée, épisode suivant, recherche
+globale (9).
 
 ## Prérequis
 
@@ -341,6 +343,46 @@ Mesuré dans le navigateur (portail factice) : débit du spectateur bridé à 70
 qualité descend seule à 360p, puis 19,5 s lues en 20 s ; après 8 s de coupure totale, la
 lecture repart seule.
 
+## Films et séries
+
+**Catalogue.** Le serveur lit les films et les séries de chaque portail page par page (14 titres
+par appel, appels limités) et les garde dans SQLite, comme les chaînes ; le navigateur les garde
+dans IndexedDB. Sur un grand portail, la première lecture prend plusieurs minutes : la liste
+s'affiche dès le premier titre et grandit sous les yeux du spectateur. Ensuite, ouverture
+instantanée (hors ligne compris), relecture en arrière-plan une fois par jour. Affiches relayées
+par Lumen, contenus « adulte » du portail écartés. Vue « Tous les portails » : un même titre
+(nom normalisé, année) n'apparaît qu'une fois.
+
+**Lecture.** FFmpeg lit le fichier du portail à partir de la position voulue et le serveur le
+découpe en segments HLS, flux copiés (conversion seulement de ce que le navigateur ne lit pas :
+MPEG-2, HEVC, AC-3…). Chaque segment porte sa vraie position dans le titre
+(`EXT-X-PROGRAM-DATE-TIME`) : la barre de lecture est juste, quel que soit le point de départ.
+
+- **Saut dans ce qui est chargé** : immédiat. **Au-delà** : une nouvelle lecture part de la
+  position voulue (≈ 1 à 2 s) et remplace l'ancienne.
+- **Production réglée sur le lecteur** : FFmpeg s'arrête à 60 s d'avance et reprend à la demande
+  suivante. Un film en pause ne coûte ni processeur ni données.
+- **Coupure du portail en plein film** : un relais local entre FFmpeg et le portail reprend le
+  fichier à l'octet près (Range), redemande un lien s'il a expiré, relit depuis le début en
+  sautant le déjà-transmis si le serveur ignore Range. FFmpeg ne voit qu'un fichier qui arrive.
+  Lecture qui s'arrêterait quand même avant la fin : le lecteur repart seul de là.
+- **Secrets** : FFmpeg ne lit qu'une adresse de boucle locale opaque ; ni jeton, ni MAC, ni
+  adresse du portail dans ses arguments, ses messages ou les journaux.
+- **Pistes audio** nommées dans la langue du spectateur (« Français (5.1) »), changement en un geste.
+
+**Reprise.** La position est enregistrée toutes les 10 s, à chaque pause et en quittant, sur le
+serveur : « Reprendre » sur l'accueil de tous les appareils du compte. Un titre est « vu » à 95 %,
+ou à 3 minutes de la fin s'il dure plus de 20 minutes. Fin d'un épisode : le suivant démarre
+après 10 s (annulable), y compris d'une saison à l'autre.
+
+**Recherche globale** : chaînes, films et séries depuis un seul champ, sur les index locaux.
+
+**Télécommande** : tout est focalisable aux flèches ; dans le lecteur, gauche/droite reculent ou
+avancent de 10 s, OK met en pause.
+
+Mesuré (portail factice, film de 64 s) : lecture prête en moins de 3 s ; coupure de 3 s du
+portail en plein film, aucun trou dans le film.
+
 ## Arborescence
 
 ```
@@ -467,9 +509,12 @@ autres, un par un : une mesure de bascule n'a de valeur que sur une machine calm
 | Remux (`-c copy`)                                     | coût CPU négligeable      |
 | Transcodage AC3 → AAC                                 | faible                    |
 | Transcodage HEVC → H.264 sans accélération matérielle | ≈ un cœur CPU par flux    |
+| Mémoire d'une lecture de film (60 s d'avance + 30 s)  | ≈ 35 Mo à 3 Mbit/s        |
 
 Le relais mutualise une connexion amont par chaîne, quel que soit le nombre de spectateurs : le
-coût amont dépend du nombre de chaînes regardées, le coût aval du nombre de spectateurs. C'est
+coût amont dépend du nombre de chaînes regardées, le coût aval du nombre de spectateurs. Un
+film, lui, n'est pas partagé : une connexion au portail et un FFmpeg par lecture
+(`LUMEN_VOD_MAX_SESSIONS`, 10 par défaut). C'est
 pourquoi la cible initiale est l'auto-hébergement.
 
 ## Limite assumée

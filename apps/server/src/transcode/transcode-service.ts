@@ -72,13 +72,7 @@ export class TranscodeService {
     if (output === undefined) {
       const streams = relay.programStreams;
       const video = streams !== null && planOutput(streams, caps, quality).video !== 'copy';
-      if (video && this.activeVideo >= this.options.maxVideo) {
-        throw new ApiError(
-          503,
-          'transcode_busy',
-          'le serveur convertit déjà le maximum de chaînes à la fois ; réessayez dans un moment',
-        );
-      }
+      if (video && this.activeVideo >= this.options.maxVideo) throw transcodeBusy();
       const created = new TranscodedOutput(
         caps,
         quality,
@@ -102,6 +96,28 @@ export class TranscodeService {
     return output;
   }
 
+  /** Encodeur retenu, une fois la détection finie. */
+  encoderReady(): Promise<EncoderChoice> {
+    return this.encoder;
+  }
+
+  /**
+   * Place de transcodage vidéo hors relais (lecture d'un film), comptée dans le même plafond
+   * que les chaînes. Lève `transcode_busy` si tout est pris ; la fonction rendue la libère.
+   */
+  reserveVideo(): () => void {
+    if (this.activeVideo >= this.options.maxVideo) throw transcodeBusy();
+    this.activeVideo++;
+    this.active++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.activeVideo--;
+      this.active--;
+    };
+  }
+
   release(relay: Relay, output: TranscodedOutput): void {
     output.viewers = Math.max(0, output.viewers - 1);
     if (output.viewers > 0) return;
@@ -109,6 +125,13 @@ export class TranscodeService {
     output.close();
   }
 }
+
+const transcodeBusy = (): ApiError =>
+  new ApiError(
+    503,
+    'transcode_busy',
+    'le serveur convertit déjà le maximum de flux à la fois ; réessayez dans un moment',
+  );
 
 /** Deux spectateurs aux mêmes capacités partagent la même sortie transcodée. */
 export const capabilitiesKey = (caps: ClientCapabilities): string =>

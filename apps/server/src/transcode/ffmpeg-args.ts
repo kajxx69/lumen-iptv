@@ -117,3 +117,39 @@ export function transcodeArgs(plan: OutputPlan, enc: EncoderChoice, o: Transcode
     '-f', 'mpegts', '-muxdelay', String(MUX_DELAY_S), '-muxpreload', '0', 'pipe:1',
   ];
 }
+
+/** Film ou épisode à lire : l'adresse du relais local, la position de départ, la piste audio. */
+export interface VodInput {
+  url: string;
+  startS: number;
+  audioIndex: number;
+  /** Lecture du début du fichier pour y trouver les pistes (voir probe.ts). */
+  analysisArgs: readonly string[];
+}
+
+/**
+ * FFmpeg lit le fichier d'un film (par le relais local) à partir de `startS` et produit du
+ * MPEG-TS lisible par le navigateur : flux copiés autant que possible, convertis sinon.
+ */
+export function vodArgs(
+  input: VodInput,
+  plan: OutputPlan,
+  enc: EncoderChoice,
+  o: TranscodeOptions,
+): string[] {
+  // prettier-ignore
+  return [
+    '-hide_banner', '-loglevel', 'error', '-nostdin',
+    ...(plan.video === 'h264' && enc.encoder === 'h264_vaapi' ? ['-vaapi_device', VAAPI_DEVICE] : []),
+    // Recherche avant lecture : FFmpeg part de l'image clé qui précède la position voulue.
+    ...(input.startS > 0 ? ['-ss', input.startS.toFixed(3)] : []),
+    '-fflags', '+genpts+discardcorrupt', ...input.analysisArgs, '-i', input.url,
+    // Horodatages du fichier conservés : chaque segment sait où il se place dans le film.
+    '-copyts',
+    // « V » : la vidéo du film, jamais une pochette intégrée au fichier.
+    '-map', '0:V:0?', '-map', `0:a:${input.audioIndex}?`, '-sn', '-dn',
+    ...videoArgs(plan, enc, o),
+    ...audioArgs(plan, o),
+    '-f', 'mpegts', '-muxdelay', String(MUX_DELAY_S), '-muxpreload', '0', 'pipe:1',
+  ];
+}

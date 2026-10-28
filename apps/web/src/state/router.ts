@@ -1,58 +1,7 @@
 import { create } from 'zustand';
+import { type Route, parseRoute, routePath } from './routes.js';
 
-/** Écrans de l'application ; l'URL reflète l'écran pour que « retour » et le rechargement marchent. */
-export type Route =
-  | { name: 'home' }
-  | { name: 'tv'; genre: string | null }
-  | { name: 'guide'; genre: string | null }
-  | { name: 'settings' }
-  | { name: 'login' }
-  | { name: 'watch'; portalId: string; channelId: string };
-
-export function parseRoute(path: string, search = ''): Route {
-  const params = new URLSearchParams(search);
-  const parts = path
-    .split('/')
-    .filter((p) => p !== '')
-    .map(decodeURIComponent);
-  switch (parts[0]) {
-    case undefined:
-      return { name: 'home' };
-    case 'tv':
-      return { name: 'tv', genre: params.get('genre') };
-    case 'guide':
-      return { name: 'guide', genre: params.get('genre') };
-    case 'reglages':
-      return { name: 'settings' };
-    case 'connexion':
-      return { name: 'login' };
-    case 'regarder':
-      if (parts[1] !== undefined && parts[2] !== undefined) {
-        return { name: 'watch', portalId: parts[1], channelId: parts[2] };
-      }
-      return { name: 'home' };
-    default:
-      return { name: 'home' };
-  }
-}
-
-export function routePath(route: Route): string {
-  const genre = (g: string | null): string => (g === null ? '' : `?genre=${encodeURIComponent(g)}`);
-  switch (route.name) {
-    case 'home':
-      return '/';
-    case 'tv':
-      return `/tv${genre(route.genre)}`;
-    case 'guide':
-      return `/guide${genre(route.genre)}`;
-    case 'settings':
-      return '/reglages';
-    case 'login':
-      return '/connexion';
-    case 'watch':
-      return `/regarder/${encodeURIComponent(route.portalId)}/${encodeURIComponent(route.channelId)}`;
-  }
-}
+export { type Route, parseRoute, routePath };
 
 interface RouterState {
   route: Route;

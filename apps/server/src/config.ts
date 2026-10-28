@@ -188,6 +188,43 @@ export const ServerConfigSchema = z.object({
     .int()
     .positive()
     .default(2 * DAY),
+  /**
+   * Catalogue de films et de séries relu en arrière-plan au-delà de cet âge. Il se lit page
+   * par page (plusieurs minutes sur un grand portail) et change peu : une fois par jour.
+   */
+  vodCatalogTtlMs: z.coerce.number().int().positive().default(DAY),
+  /** Saisons et épisodes d'une série gardés en mémoire : une fiche rouverte n'interroge pas le portail. */
+  vodSeriesCacheTtlMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(30 * MINUTE),
+  /**
+   * Lectures de films simultanées pour tout le serveur : chacune tient une connexion au
+   * portail et un FFmpeg (copie du flux, sauf conversion).
+   */
+  vodMaxSessions: z.coerce.number().int().positive().default(10),
+  /** Durée visée d'un segment de film : 4 s, le lecteur charge vite et saute à l'image clé près. */
+  vodSegmentTargetS: z.coerce.number().positive().default(4),
+  /**
+   * Avance produite au plus devant ce que le lecteur a demandé : FFmpeg est mis en pause
+   * au-delà. Mémoire bornée (≈ 25 Mo à 3 Mbit/s), et un film en pause ne coûte plus rien.
+   */
+  vodAheadS: z.coerce.number().positive().default(60),
+  /**
+   * Segments gardés derrière le dernier demandé : de quoi relire un instant (retour de
+   * 10 s) sans relancer la lecture. Au-delà, un retour arrière relance au bon endroit.
+   */
+  vodBehindS: z.coerce.number().min(0).default(30),
+  /** Le fichier ne répond plus : nouvelles tentatives (reprise à l'octet près) pendant ce délai. */
+  vodUpstreamRetryDeadlineMs: z.coerce.number().int().positive().default(30_000),
+  /** Lecture des propriétés du fichier (durée, pistes) : au-delà, le portail est jugé injoignable. */
+  vodProbeTimeoutMs: z.coerce.number().int().positive().default(20_000),
+  /** Premier segment attendu au plus ce délai après le lancement. */
+  vodStartTimeoutMs: z.coerce.number().int().positive().default(30_000),
+  /** FFprobe (propriétés des films) ; par défaut, à côté de FFmpeg. */
+  ffprobePath: z.string().optional(),
+
   /** Cache navigateur des logos : ils changent rarement et coûtent des données mobiles. */
   logoCacheMaxAgeS: z.coerce
     .number()
@@ -252,6 +289,16 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
     epgCacheTtlMs: 'EPG_CACHE_TTL_MS',
     epgMaxWindowMs: 'EPG_MAX_WINDOW_MS',
     logoCacheMaxAgeS: 'LOGO_CACHE_MAX_AGE_S',
+    vodCatalogTtlMs: 'VOD_CATALOG_TTL_MS',
+    vodSeriesCacheTtlMs: 'VOD_SERIES_CACHE_TTL_MS',
+    vodMaxSessions: 'VOD_MAX_SESSIONS',
+    vodSegmentTargetS: 'VOD_SEGMENT_TARGET_S',
+    vodAheadS: 'VOD_AHEAD_S',
+    vodBehindS: 'VOD_BEHIND_S',
+    vodUpstreamRetryDeadlineMs: 'VOD_UPSTREAM_RETRY_DEADLINE_MS',
+    vodProbeTimeoutMs: 'VOD_PROBE_TIMEOUT_MS',
+    vodStartTimeoutMs: 'VOD_START_TIMEOUT_MS',
+    ffprobePath: 'FFPROBE_PATH',
     logLevel: 'LOG_LEVEL',
   };
   const input: Record<string, unknown> = {};
@@ -278,3 +325,12 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
 }
 
 export const resolveConfig = (input: ServerConfigInput): ServerConfig => ServerConfigSchema.parse(input);
+
+/** FFprobe configuré, ou celui qui accompagne FFmpeg (même dossier, même installation). */
+export function ffprobePathOf(config: Pick<ServerConfig, 'ffmpegPath' | 'ffprobePath'>): string {
+  if (config.ffprobePath !== undefined) return config.ffprobePath;
+  return config.ffmpegPath.replace(
+    /ffmpeg(\.exe)?$/i,
+    (_m, exe: string | undefined) => `ffprobe${exe ?? ''}`,
+  );
+}

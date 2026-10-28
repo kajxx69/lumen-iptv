@@ -4,7 +4,8 @@ export interface SearchableChannel {
   /** Clé unique `portail:chaîne`. */
   key: string;
   name: string;
-  number: number;
+  /** Numéro de chaîne, ou année d'un film : cherchable comme un mot. */
+  number?: number | null;
 }
 
 /** À partir de cette longueur, un mot tolère une faute de frappe. */
@@ -45,7 +46,7 @@ export class ChannelSearch {
       const normalized = normalizeName(c.name);
       this.nameLengths[doc] = Math.min(normalized.length, 0xffff);
       const tokens = new Set(normalized.split(TOKEN_SEPARATOR).filter((t) => t !== ''));
-      tokens.add(String(c.number));
+      if (c.number != null) tokens.add(String(c.number));
       for (const t of tokens) {
         const list = lists.get(t);
         if (list === undefined) lists.set(t, [doc]);

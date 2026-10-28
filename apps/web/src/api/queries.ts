@@ -17,7 +17,7 @@ import { ApiError, request, requestJson } from './client.js';
  * Dernière réponse gardée sur l'appareil pour les petites listes (portails, favoris,
  * récents) : hors ligne, l'application s'ouvre avec elles au lieu d'un écran vide.
  */
-function persisted<S extends z.ZodType>(key: string, schema: S) {
+export function persisted<S extends z.ZodType>(key: string, schema: S) {
   const storageKey = `lumen.cache.${key}`;
   return {
     initial: (): z.output<S> | undefined => {
@@ -47,7 +47,7 @@ const recentsCache = persisted('recents', z.array(RecentDto));
 
 /** Effacé à la déconnexion : le compte suivant ne doit rien voir du précédent. */
 function clearPersisted(): void {
-  for (const key of ['portals', 'favorites', 'recents']) {
+  for (const key of ['portals', 'favorites', 'recents', 'progress']) {
     try {
       window.localStorage.removeItem(`lumen.cache.${key}`);
     } catch {
