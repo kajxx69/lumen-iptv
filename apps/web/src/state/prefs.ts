@@ -15,11 +15,18 @@ interface Prefs {
   /** Qualité maximale par réseau, et économie de données. */
   quality: QualityPrefs;
   setQualityPrefs: (change: Partial<QualityPrefs>) => void;
+  /**
+   * Langue de sous-titres choisie en dernier (code ISO 639 du fichier) : retrouvée d'un film
+   * à l'autre. null : sans sous-titres.
+   */
+  subtitleLanguage: string | null;
+  setSubtitleLanguage: (language: string | null) => void;
 }
 
 const PORTAL_KEY = 'lumen.portal';
 const LOW_LATENCY_KEY = 'lumen.lowLatency';
 const QUALITY_KEY = 'lumen.quality';
+const SUBTITLES_KEY = 'lumen.subtitles';
 
 function readQuality(): QualityPrefs {
   try {
@@ -75,6 +82,17 @@ export const usePrefs = create<Prefs>((set) => ({
       write(QUALITY_KEY, JSON.stringify(quality));
       return { quality };
     });
+  },
+  subtitleLanguage: read(SUBTITLES_KEY),
+  setSubtitleLanguage: (language) => {
+    if (language === null) {
+      try {
+        window.localStorage.removeItem(SUBTITLES_KEY);
+      } catch {
+        // Rien à effacer.
+      }
+    } else write(SUBTITLES_KEY, language);
+    set({ subtitleLanguage: language });
   },
   lowLatency: readList(LOW_LATENCY_KEY),
   toggleLowLatency: (channelKey) => {

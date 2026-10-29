@@ -1,5 +1,5 @@
 import Hls, { type ErrorData } from 'hls.js';
-import { type RefObject, useEffect, useRef, useState } from 'react';
+import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
 import {
   ADAPTIVE_BUFFER,
   ADAPTIVE_BUFFER_LOW_LATENCY,
@@ -91,6 +91,11 @@ export interface HlsPlayerState {
   /** Retard actuel sur le direct (s). */
   latencyS: number | null;
   telemetry: HlsTelemetry;
+  /**
+   * Début (temps de la vidéo) de ce que le serveur garde encore du direct, d'après la
+   * dernière playlist : une image figée avant ce point n'est plus disponible. null : inconnu.
+   */
+  liveWindowStart: () => number | null;
 }
 
 const bufferAhead = (video: HTMLVideoElement): number => {
@@ -307,5 +312,10 @@ export function useHls(
     };
   }, [videoRef, streamUrl, onSessionLost, lowLatency, unstableNetwork]);
 
-  return { stalled, needsGesture, latencyS, telemetry };
+  const liveWindowStart = useCallback((): number | null => {
+    const details = hlsRef.current?.latestLevelDetails;
+    return details?.live === true && details.fragments.length > 0 ? details.fragmentStart : null;
+  }, []);
+
+  return { stalled, needsGesture, latencyS, telemetry, liveWindowStart };
 }

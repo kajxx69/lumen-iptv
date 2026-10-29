@@ -3,6 +3,7 @@ import {
   type MovieListDto,
   type SeriesDetailDto,
   type SeriesListDto,
+  type SubtitleCuesDto,
   VOD_TIMELINE_EPOCH_MS,
   type VodPlaybackDto,
   type VodPlayRequest,
@@ -256,4 +257,82 @@ describe('lecture de films : conversion', () => {
     expect(await probeCodecs(segment)).toEqual({ video: 'h264', audio: 'aac' });
     await stack.srv.admin.delete(`/api/vod/sessions/${dto.sessionId}`);
   }, 120_000);
+});
+
+describe('lecture de films : pistes audio et sous-titres', () => {
+  let stack: Stack;
+  let movieId: string;
+  beforeAll(async () => {
+    stack = await startStack({ channelCount: 10, vodCount: 8, seriesCount: 1, multilingualMovieEvery: 4 });
+    const list = await waitFor(
+      'catalogue de films',
+      async () => {
+        const res = await stack.srv.admin.get<MovieListDto>(`/api/portals/${stack.portalDto.id}/movies`);
+        return res.body.complete ? res.body : undefined;
+      },
+      60_000,
+      200,
+    );
+    // Un film sur quatre est un MKV à deux langues et deux sous-titres.
+    movieId = list.items.find((m) => Number(m.id) % 4 === 0)?.id ?? '';
+  }, 120_000);
+  afterAll(async () => stack.close());
+
+  const movie = (): VodPlayRequest['item'] => ({ kind: 'movie', portalId: stack.portalDto.id, movieId });
+  const cues = async (dto: VodPlaybackDto, index: number): Promise<SubtitleCuesDto> =>
+    (
+      await stack.srv.admin.get<SubtitleCuesDto>(
+        `/api/vod/sessions/${dto.sessionId}/subtitles/${index}?after=0`,
+      )
+    ).body;
+
+  it('pistes nommées dans la langue du spectateur ; répliques à leur place dans le film', async () => {
+    const dto = await play(stack.srv.admin, { item: movie() });
+    expect(dto.audioTracks.map((t) => t.label)).toEqual(['Français', 'Anglais']);
+    expect(dto.audioTrack).toBe(0);
+    expect(dto.subtitleTracks).toEqual([
+      { index: 0, language: 'fre', label: 'Français', kind: 'text' },
+      { index: 1, language: 'eng', label: 'Anglais', kind: 'text' },
+    ]);
+    await readToEnd(stack.srv.admin, dto, 60_000);
+    const fr = await waitFor(
+      'sous-titres complets',
+      async () => {
+        const batch = await cues(dto, 0);
+        return batch.complete ? batch : undefined;
+      },
+      10_000,
+    );
+    // « Réplique n » commence à 4 × (n − 1) s dans le film (voir le portail factice).
+    const third = fr.cues.find((c) => c.text === 'Réplique 3');
+    expect(third?.startS).toBeCloseTo(8, 1);
+    expect(third?.endS).toBeCloseTo(11, 1);
+    expect(fr.cues.length).toBeGreaterThan(10);
+    expect((await cues(dto, 1)).cues.some((c) => c.text === 'Line 3')).toBe(true);
+    // Relève incrémentale : rien de neuf après le dernier rang.
+    const after = (
+      await stack.srv.admin.get<SubtitleCuesDto>(
+        `/api/vod/sessions/${dto.sessionId}/subtitles/0?after=${fr.next}`,
+      )
+    ).body;
+    expect(after.cues).toEqual([]);
+    expect((await stack.srv.admin.get(`/api/vod/sessions/${dto.sessionId}/subtitles/7`)).status).toBe(404);
+    await stack.srv.admin.delete(`/api/vod/sessions/${dto.sessionId}`);
+  }, 90_000);
+
+  it('reprise à 40 s, piste anglaise : répliques toujours en position dans le film', async () => {
+    const dto = await play(stack.srv.admin, { item: movie(), startS: 40, audioTrack: 1 });
+    expect(dto.audioTrack).toBe(1);
+    await readToEnd(stack.srv.admin, dto, 60_000);
+    const fr = await waitFor(
+      'sous-titres complets',
+      async () => {
+        const batch = await cues(dto, 0);
+        return batch.complete ? batch : undefined;
+      },
+      10_000,
+    );
+    expect(fr.cues.find((c) => c.text === 'Réplique 12')?.startS).toBeCloseTo(44, 1);
+    await stack.srv.admin.delete(`/api/vod/sessions/${dto.sessionId}`);
+  }, 90_000);
 });

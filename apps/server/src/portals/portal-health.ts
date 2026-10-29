@@ -1,6 +1,14 @@
+import { StalkerError, type StalkerErrorKind } from '@lumen/core/stalker';
 import type { PortalHealthDto } from '@lumen/protocol';
 import type { CatalogStore } from '../store/catalog-store.js';
 import type { PortalRegistry } from './registry.js';
+
+/**
+ * Seules ces erreurs disent « le portail ne répond pas » : réseau coupé, délai dépassé, erreur
+ * HTTP (5xx). Une réponse qu'on ne sait pas lire (beaucoup de portails n'implémentent pas
+ * get_account_info et renvoient une page vide) prouve au contraire que le portail est là.
+ */
+const UNREACHABLE_KINDS: ReadonlySet<StalkerErrorKind> = new Set(['network', 'timeout', 'http']);
 
 /** Au-delà, le portail est déclaré injoignable : l'utilisateur n'attend pas plus pour être prévenu. */
 const HEALTH_TIMEOUT_MS = 4000;
@@ -40,7 +48,7 @@ export class PortalHealth {
     const reachable = await Promise.race([
       portal.provider.client.getAccountInfo().then(
         () => true,
-        () => false,
+        (err: unknown) => !(err instanceof StalkerError && UNREACHABLE_KINDS.has(err.kind)),
       ),
       timeout,
     ]);

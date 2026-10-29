@@ -8,6 +8,7 @@
     "./stalker": "./stalker/index.ts",
     "./sources": "./sources/index.ts",
     "./catalog": "./catalog/index.ts",
+    "./subtitles": "./subtitles/index.ts",
     "./resilience": "./resilience/index.ts"
   },
   "scripts": {

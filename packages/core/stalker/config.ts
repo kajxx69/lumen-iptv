@@ -5,6 +5,12 @@
 export interface StalkerTuning {
   /** Délai maximal d'une requête au portail. Au-delà, le réseau mobile est jugé perdu pour cette tentative. */
   requestTimeoutMs: number;
+  /**
+   * Délai de get_all_channels : tout le catalogue d'un coup, plusieurs mégaoctets sur un grand
+   * portail. Sur une liaison modeste, 10 s n'y suffisent pas ; et l'échec coûte bien plus cher
+   * (pagination de milliers de pages, limitées à 5 par seconde) qu'une attente de deux minutes.
+   */
+  bulkRequestTimeoutMs: number;
   /** PROJECT.md : 5 req/s. Un portail saturé bannit la MAC. */
   rateLimitPerSecond: number;
   /** PROJECT.md : 4 requêtes parallèles maximum pendant la pagination. */
@@ -31,6 +37,7 @@ export interface StalkerTuning {
 
 export const DEFAULT_TUNING: StalkerTuning = {
   requestTimeoutMs: 10_000,
+  bulkRequestTimeoutMs: 120_000,
   rateLimitPerSecond: 5,
   pageConcurrency: 4,
   retryAttempts: 3,

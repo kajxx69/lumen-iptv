@@ -83,8 +83,16 @@ export class Transport {
   ) {}
 
   /** Contenu `js` de la réponse, ou erreur typée. */
-  async send(endpoint: string, params: QueryParams, headers: Record<string, string>): Promise<unknown> {
-    return interpret(await this.request(endpoint, params, headers), String(params['action'] ?? ''));
+  async send(
+    endpoint: string,
+    params: QueryParams,
+    headers: Record<string, string>,
+    timeoutMs = this.tuning.requestTimeoutMs,
+  ): Promise<unknown> {
+    return interpret(
+      await this.request(endpoint, params, headers, timeoutMs),
+      String(params['action'] ?? ''),
+    );
   }
 
   /** Réponse HTTP brute ; seuls le réseau et le délai lèvent une erreur. */
@@ -92,14 +100,16 @@ export class Transport {
     endpoint: string,
     params: QueryParams,
     headers: Record<string, string>,
+    timeoutMs = this.tuning.requestTimeoutMs,
   ): Promise<HttpResponse> {
     const action = String(params['action'] ?? '');
     await this.limiter.acquire();
     const url = `${endpoint}?${buildQuery(params)}`;
     return this.withTimeout(
-      this.runtime.http.request({ url, method: 'GET', headers, timeoutMs: this.tuning.requestTimeoutMs }),
+      this.runtime.http.request({ url, method: 'GET', headers, timeoutMs }),
       action,
       endpoint,
+      timeoutMs,
     );
   }
 
@@ -107,8 +117,8 @@ export class Transport {
     request: Promise<HttpResponse>,
     action: string,
     endpoint: string,
+    timeoutMs: number,
   ): Promise<HttpResponse> {
-    const timeoutMs = this.tuning.requestTimeoutMs;
     return new Promise((resolve, reject) => {
       let settled = false;
       const cancel = this.runtime.setTimer(() => {

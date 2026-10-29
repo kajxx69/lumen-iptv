@@ -34,14 +34,24 @@ function encoderTuning(encoder: string): string[] {
   }
 }
 
-function videoArgs(plan: OutputPlan, enc: EncoderChoice, o: TranscodeOptions): string[] {
-  if (plan.video === 'copy') return ['-c:v', 'copy'];
+/** Filtres de l'image convertie : cadence (audio seul), puis mise à l'échelle (sur le GPU en VAAPI). */
+function videoChain(plan: OutputPlan, enc: EncoderChoice, o: TranscodeOptions): string {
+  const step = plan.ladder;
+  const height = step?.height ?? o.maxHeight;
+  const fps = step?.fps == null ? '' : `fps=${step.fps},`;
+  // Décodage logiciel, mise à l'échelle et encodage sur le GPU.
+  if (enc.encoder === 'h264_vaapi')
+    return `${fps}format=nv12,hwupload,scale_vaapi=w=-2:h='min(${height},ih)'`;
+  return `${fps}scale=-2:'min(${height},ih)'`;
+}
+
+/** Encodeur et ses réglages, sans les filtres. */
+function videoEncoder(plan: OutputPlan, enc: EncoderChoice): string[] {
   // Images clés aux mêmes instants que la source : les segments de la sortie convertie tombent
   // exactement sur ceux de la sortie directe, une vue de session passe de l'une à l'autre sans
   // rien sauter. Image quasi fixe (audio seul) : chaque image est une image clé.
   const keyframes = plan.ladder?.fps == null ? ['-force_key_frames', 'source'] : ['-g', '1'];
   const step = plan.ladder;
-  const height = step?.height ?? o.maxHeight;
   // Palier réduit : débit plafonné, et images espacées pour l'audio seul.
   const rate =
     step === undefined
@@ -54,23 +64,19 @@ function videoArgs(plan: OutputPlan, enc: EncoderChoice, o: TranscodeOptions): s
           '-bufsize',
           `${2 * step.videoKbps}k`,
         ];
-  const fps = step?.fps == null ? '' : `fps=${step.fps},`;
-  if (enc.encoder === 'h264_vaapi') {
-    // Décodage logiciel, mise à l'échelle et encodage sur le GPU.
-    // prettier-ignore
-    return [
-      '-vf', `${fps}format=nv12,hwupload,scale_vaapi=w=-2:h='min(${height},ih)'`,
-      '-c:v', 'h264_vaapi', ...rate, ...keyframes,
-    ];
-  }
+  if (enc.encoder === 'h264_vaapi') return ['-c:v', 'h264_vaapi', ...rate, ...keyframes];
   // prettier-ignore
   return [
-    '-vf', `${fps}scale=-2:'min(${height},ih)'`,
     '-c:v', enc.encoder, ...(step === undefined ? encoderTuning(enc.encoder) : [...speedTuning(enc.encoder), ...rate]),
     // Quick Sync attend du NV12 ; les autres, du YUV 4:2:0 planaire (profil lu partout).
     '-pix_fmt', enc.encoder === 'h264_qsv' ? 'nv12' : 'yuv420p',
     ...keyframes,
   ];
+}
+
+function videoArgs(plan: OutputPlan, enc: EncoderChoice, o: TranscodeOptions): string[] {
+  if (plan.video === 'copy') return ['-c:v', 'copy'];
+  return ['-vf', videoChain(plan, enc, o), ...videoEncoder(plan, enc)];
 }
 
 function audioArgs(plan: OutputPlan, o: TranscodeOptions): string[] {
@@ -125,11 +131,19 @@ export interface VodInput {
   audioIndex: number;
   /** Lecture du début du fichier pour y trouver les pistes (voir probe.ts). */
   analysisArgs: readonly string[];
+  /** Pistes de sous-titres texte extraites en WebVTT, chacune sur sa sortie (`pipe:3`, `pipe:4`…). */
+  textSubtitles: readonly number[];
+  /** Piste de sous-titres en images incrustée dans l'image (qui est alors convertie) ; null : aucune. */
+  burnSubtitle: number | null;
 }
+
+/** Première sortie des sous-titres texte : 0, 1 et 2 sont l'entrée, la vidéo et les messages. */
+export const FIRST_SUBTITLE_FD = 3;
 
 /**
  * FFmpeg lit le fichier d'un film (par le relais local) à partir de `startS` et produit du
- * MPEG-TS lisible par le navigateur : flux copiés autant que possible, convertis sinon.
+ * MPEG-TS lisible par le navigateur : flux copiés autant que possible, convertis sinon. Les
+ * sous-titres texte sortent à part, en WebVTT, au rythme de la lecture du fichier.
  */
 export function vodArgs(
   input: VodInput,
@@ -137,6 +151,16 @@ export function vodArgs(
   enc: EncoderChoice,
   o: TranscodeOptions,
 ): string[] {
+  const burn = input.burnSubtitle !== null && plan.video === 'h264';
+  const video = burn
+    ? [
+        // Sous-titres en images posés sur l'image avant sa mise à l'échelle.
+        '-filter_complex',
+        `[0:V:0][0:s:${input.burnSubtitle}]overlay,${videoChain(plan, enc, o)}[v]`,
+        '-map',
+        '[v]',
+      ]
+    : ['-map', '0:V:0?'];
   // prettier-ignore
   return [
     '-hide_banner', '-loglevel', 'error', '-nostdin',
@@ -144,12 +168,17 @@ export function vodArgs(
     // Recherche avant lecture : FFmpeg part de l'image clé qui précède la position voulue.
     ...(input.startS > 0 ? ['-ss', input.startS.toFixed(3)] : []),
     '-fflags', '+genpts+discardcorrupt', ...input.analysisArgs, '-i', input.url,
-    // Horodatages du fichier conservés : chaque segment sait où il se place dans le film.
+    // Horodatages du fichier conservés : chaque segment et chaque réplique savent où ils se
+    // placent dans le film.
     '-copyts',
     // « V » : la vidéo du film, jamais une pochette intégrée au fichier.
-    '-map', '0:V:0?', '-map', `0:a:${input.audioIndex}?`, '-sn', '-dn',
-    ...videoArgs(plan, enc, o),
+    ...video, '-map', `0:a:${input.audioIndex}?`, '-sn', '-dn',
+    ...(burn ? videoEncoder(plan, enc) : videoArgs(plan, enc, o)),
     ...audioArgs(plan, o),
     '-f', 'mpegts', '-muxdelay', String(MUX_DELAY_S), '-muxpreload', '0', 'pipe:1',
+    ...input.textSubtitles.flatMap((index, k) => [
+      '-map', `0:s:${index}`, '-c:s', 'webvtt', '-f', 'webvtt', '-flush_packets', '1',
+      `pipe:${FIRST_SUBTITLE_FD + k}`,
+    ]),
   ];
 }

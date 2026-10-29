@@ -1,5 +1,10 @@
-import type { ProgressUpdateRequest, VodItemRef } from '@lumen/protocol';
-import { useQueryClient } from '@tanstack/react-query';
+import { type Cue, parseSubtitles } from '@lumen/core/subtitles';
+import { EpgEntryDto, type ProgressUpdateRequest, type VodItemRef } from '@lumen/protocol';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { z } from 'zod';
+import { requestJson } from '../api/client.js';
+import { useCatalog } from '../catalog/use-catalog.js';
+import { formatTime } from '../epg/layout.js';
 import { type MouseEvent, useCallback, useEffect, useRef, useState } from 'react';
 import {
   episodesQuery,
@@ -16,7 +21,8 @@ import { dataUsage, formatBytes } from '../player/data-usage.js';
 import { QUALITY_LABEL, capFor } from '../player/quality.js';
 import { useNetwork } from '../player/use-network.js';
 import { useVodPlayer } from '../player/use-vod-player.js';
-import { episodeLabel, formatClock, nextEpisode } from '../player/vod-timeline.js';
+import { SUBTITLE_DELAY_STEP_S, useActiveCueText, useServerCues } from '../player/subtitles.js';
+import { afterArchive, behindLiveS, episodeLabel, formatClock, nextEpisode } from '../player/vod-timeline.js';
 import { usePrefs } from '../state/prefs.js';
 import { goBack, navigate } from '../state/router.js';
 
@@ -36,8 +42,23 @@ const RESUME_WAIT_MS = 1500;
 /** Épisode suivant lancé seul après ce compte à rebours (annulable). */
 const NEXT_EPISODE_DELAY_S = 10;
 const MS_PER_S = 1000;
+const SECONDS_PER_MINUTE = 60;
+/** Programmes lus autour d'une émission archivée : elle-même, et de quoi enchaîner les suivantes. */
+const ARCHIVE_GUIDE_AFTER_MS = 6 * 3_600_000;
 
-const itemIdOf = (item: VodItemRef): string => (item.kind === 'movie' ? item.movieId : item.episodeId);
+/** Sous-titres affichés : aucun, une piste du fichier, ou un fichier chargé depuis l'appareil. */
+type SubtitleChoice = { kind: 'off' } | { kind: 'track'; index: number } | { kind: 'file' };
+
+const itemIdOf = (item: VodItemRef): string => {
+  switch (item.kind) {
+    case 'movie':
+      return item.movieId;
+    case 'episode':
+      return item.episodeId;
+    case 'archive':
+      return `${item.channelId}@${item.start}`;
+  }
+};
 
 /** Point de départ : celui demandé, sinon la reprise enregistrée (si le titre n'est pas fini). */
 function useStartPosition(item: VodItemRef, requested: number | null): number | null {
@@ -54,6 +75,11 @@ function useStartPosition(item: VodItemRef, requested: number | null): number | 
   }, []);
   useEffect(() => {
     if (start !== null) return;
+    // Émission archivée : pas de reprise enregistrée, on part du point demandé (ou du début).
+    if (item.kind === 'archive') {
+      setStart(0);
+      return;
+    }
     // La copie du serveur peut être plus récente (autre appareil) : attendue un court instant,
     // puis la copie locale fait foi (hors ligne compris). On décide une seule fois.
     if (progress.isFetching && !waited) return;
@@ -74,22 +100,114 @@ function VodPlayerView({ item, startS }: { item: VodItemRef; startS: number }) {
   const client = useQueryClient();
   const network = useNetwork();
   const qualityPrefs = usePrefs((s) => s.quality);
-  const player = useVodPlayer(videoRef, item, startS, capFor(network, qualityPrefs));
+  const isArchive = item.kind === 'archive';
+  // Archive d'une émission encore à l'antenne : elle s'arrête au présent, ce n'est pas une
+  // panne. C'est l'écran qui décide de la suite (même émission, suivante ou direct).
+  const player = useVodPlayer(videoRef, item, startS, capFor(network, qualityPrefs), {
+    resumeEarlyEnd: !isArchive,
+  });
   const { state } = player;
+
+  // --- Sous-titres : piste du fichier (texte, ou images incrustées) ou fichier de l'appareil ---
+  const subtitleLanguage = usePrefs((s) => s.subtitleLanguage);
+  const setSubtitleLanguage = usePrefs((s) => s.setSubtitleLanguage);
+  const [subtitle, setSubtitle] = useState<SubtitleChoice>({ kind: 'off' });
+  const [fileCues, setFileCues] = useState<{ name: string; cues: Cue[] } | null>(null);
+  const [subtitleDelayS, setSubtitleDelayS] = useState(0);
+  const [subtitleNotice, setSubtitleNotice] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  // Langue retrouvée d'un film à l'autre : la première piste texte dans cette langue.
+  const autoPicked = useRef(false);
+  useEffect(() => {
+    if (autoPicked.current || state.subtitleTracks.length === 0) return;
+    autoPicked.current = true;
+    const preferred = state.subtitleTracks.find((t) => t.kind === 'text' && t.language === subtitleLanguage);
+    if (subtitleLanguage !== null && preferred !== undefined)
+      setSubtitle({ kind: 'track', index: preferred.index });
+  }, [state.subtitleTracks, subtitleLanguage]);
+  const textTrack =
+    subtitle.kind === 'track' && state.subtitleTracks.find((t) => t.index === subtitle.index)?.kind === 'text'
+      ? subtitle.index
+      : null;
+  const serverCues = useServerCues(state.sessionId, textTrack);
+  const cues = subtitle.kind === 'file' ? (fileCues?.cues ?? []) : serverCues;
+  const cueText = useActiveCueText(cues, player.position, subtitleDelayS);
+  const subtitleOptions: SubtitleChoice[] = [
+    { kind: 'off' },
+    ...state.subtitleTracks.map((t): SubtitleChoice => ({ kind: 'track', index: t.index })),
+    ...(fileCues === null ? [] : [{ kind: 'file' } as const]),
+  ];
+  const subtitleLabel = (c: SubtitleChoice): string => {
+    if (c.kind === 'off') return 'Aucun';
+    if (c.kind === 'file') return fileCues?.name ?? 'Fichier';
+    const t = state.subtitleTracks.find((x) => x.index === c.index);
+    return t === undefined ? 'Sous-titres' : `${t.label}${t.kind === 'image' ? ' (incrustés)' : ''}`;
+  };
+  const chooseSubtitle = (choice: SubtitleChoice): void => {
+    setSubtitle(choice);
+    setSubtitleNotice(null);
+    const t =
+      choice.kind === 'track' ? state.subtitleTracks.find((x) => x.index === choice.index) : undefined;
+    // Images : la lecture repart avec elles incrustées ; texte ou rien : plus d'incrustation.
+    player.setBurnSubtitle(t?.kind === 'image' ? t.index : null);
+    if (choice.kind !== 'file') setSubtitleLanguage(t?.language ?? null);
+  };
+  const loadSubtitleFile = async (file: File): Promise<void> => {
+    const parsed = parseSubtitles(await file.text());
+    if (parsed.length === 0) {
+      setSubtitleNotice(`Aucune réplique lisible dans « ${file.name} » (formats acceptés : SRT, WebVTT).`);
+      return;
+    }
+    setFileCues({ name: file.name, cues: parsed });
+    setSubtitle({ kind: 'file' });
+    setSubtitleNotice(null);
+    player.setBurnSubtitle(null);
+  };
 
   const isEpisode = item.kind === 'episode';
   const seriesId = isEpisode ? item.seriesId : '';
   const seasonId = isEpisode ? item.seasonId : null;
-  const movie = useMovieDetail(item.portalId, item.kind === 'movie' ? item.movieId : '', !isEpisode);
+  const movie = useMovieDetail(
+    item.portalId,
+    item.kind === 'movie' ? item.movieId : '',
+    item.kind === 'movie',
+  );
+  // Émission archivée : la chaîne, et le guide de l'émission et de celles qui suivent.
+  const archive = item.kind === 'archive' ? item : null;
+  const live = useCatalog(isArchive ? item.portalId : null);
+  const guide = useQuery({
+    queryKey: ['archive-guide', archive?.portalId, archive?.channelId, archive?.start],
+    queryFn: () =>
+      requestJson(
+        z.array(EpgEntryDto),
+        `/api/portals/${encodeURIComponent(archive?.portalId ?? '')}/channels/${encodeURIComponent(archive?.channelId ?? '')}/epg?from=${archive?.start ?? 0}&to=${(archive?.end ?? 0) + ARCHIVE_GUIDE_AFTER_MS}`,
+      ),
+    enabled: archive !== null,
+    staleTime: Infinity,
+  });
+  const programme = guide.data?.find(
+    (p) =>
+      archive !== null && p.start <= archive.start + MS_PER_S * SECONDS_PER_MINUTE && p.end > archive.start,
+  );
   const series = useSeriesDetail(item.portalId, seriesId, isEpisode);
   const episodes = useEpisodes(item.portalId, seriesId, seasonId);
   const season = series.data?.seasons.find((s) => s.id === seasonId);
   const episode = isEpisode ? episodes.data?.find((ep) => ep.id === item.episodeId) : undefined;
+  const behindMin =
+    archive === null
+      ? null
+      : Math.round(behindLiveS(archive.start, state.positionS, Date.now()) / SECONDS_PER_MINUTE);
   const label =
     season !== undefined && episode !== undefined
       ? episodeLabel(season.number, episode.number, episode.name)
-      : null;
-  const title = isEpisode ? (series.data?.name ?? 'Épisode') : (movie.data?.name ?? 'Film');
+      : archive !== null
+        ? `${programme?.title ?? 'Émission'} · ${formatTime(archive.start)} – ${formatTime(archive.end)} · différé de ${behindMin ?? 0} min`
+        : null;
+  const title = isArchive
+    ? (live.catalog?.byId.get(archive?.channelId ?? '')?.name ?? 'Chaîne')
+    : isEpisode
+      ? (series.data?.name ?? 'Épisode')
+      : (movie.data?.name ?? 'Film');
 
   // --- Position enregistrée : reprise sur tous les appareils du compte ---
   const stateRef = useRef(state);
@@ -99,7 +217,8 @@ function VodPlayerView({ item, startS }: { item: VodItemRef; startS: number }) {
   const save = useCallback(
     (keepalive: boolean) => {
       const s = stateRef.current;
-      if (s.durationS === null || s.positionS < MIN_SAVED_POSITION_S) return;
+      // Les émissions archivées ne vont pas dans « Reprendre » : le direct les remplace.
+      if (item.kind === 'archive' || s.durationS === null || s.positionS < MIN_SAVED_POSITION_S) return;
       const update: ProgressUpdateRequest = {
         kind: item.kind,
         portalId: item.portalId,
@@ -126,6 +245,39 @@ function VodPlayerView({ item, startS }: { item: VodItemRef; startS: number }) {
   useEffect(() => {
     if (state.paused || state.ended) save(false);
   }, [state.paused, state.ended, save]);
+
+  // --- Fin d'une émission archivée : la suite de l'émission, la suivante, ou le direct ---
+  const retryRef = useRef(player.retry);
+  retryRef.current = player.retry;
+  useEffect(() => {
+    if (!state.ended || archive === null) return;
+    const after = afterArchive(
+      (guide.data ?? []).map((p) => ({ start: p.start, end: p.end, catchup: p.catchup })),
+      archive,
+      state.positionS,
+      Date.now(),
+    );
+    if (after.kind === 'live') {
+      navigate(
+        { name: 'watch', portalId: archive.portalId, channelId: archive.channelId },
+        { replace: true },
+      );
+      return;
+    }
+    // Même émission, encore à l'antenne : son archive s'est allongée, on la relit d'ici.
+    if (after.start === archive.start) {
+      retryRef.current();
+      return;
+    }
+    navigate(
+      {
+        name: 'play',
+        item: { ...archive, start: after.start, end: after.end },
+        startS: after.startS,
+      },
+      { replace: true },
+    );
+  }, [state.ended, state.positionS, archive, guide.data]);
 
   // --- Épisode suivant ---
   const [next, setNext] = useState<{ seasonId: string; episodeId: string } | null>(null);
@@ -268,6 +420,16 @@ function VodPlayerView({ item, startS }: { item: VodItemRef; startS: number }) {
           </button>
         </div>
       )}
+      {cueText !== null && (
+        <div className={`subtitles${overlay ? ' raised' : ''}`} data-testid="subtitle-text" aria-live="off">
+          {cueText}
+        </div>
+      )}
+      {(subtitleNotice ?? state.notice) !== null && overlay && (
+        <div className="player-notice" role="status" data-testid="player-notice">
+          {subtitleNotice ?? state.notice}
+        </div>
+      )}
       {next !== null && countdown !== null && (
         <div className="player-message" data-testid="next-episode" data-nav-scope>
           <p>Épisode suivant dans {countdown} s</p>
@@ -296,8 +458,24 @@ function VodPlayerView({ item, startS }: { item: VodItemRef; startS: number }) {
           </button>
           <div className="overlay-title">
             <strong>{title}</strong>
-            {label !== null && <div>{label}</div>}
+            {label !== null && <div data-testid="vod-label">{label}</div>}
           </div>
+          {archive !== null && (
+            <button
+              type="button"
+              className="button primary"
+              data-nav
+              data-testid="back-to-live"
+              onClick={() => {
+                navigate(
+                  { name: 'watch', portalId: archive.portalId, channelId: archive.channelId },
+                  { replace: true },
+                );
+              }}
+            >
+              📡 Direct
+            </button>
+          )}
           {state.quality !== null && (
             <span
               className="source"
@@ -383,6 +561,71 @@ function VodPlayerView({ item, startS }: { item: VodItemRef; startS: number }) {
               >
                 🔊 {track?.label ?? 'Piste audio'}
               </button>
+            )}
+            <button
+              type="button"
+              className="button"
+              data-nav
+              data-testid="vod-subtitles"
+              title="Sous-titres"
+              onClick={() => {
+                const i = subtitleOptions.findIndex((o) => JSON.stringify(o) === JSON.stringify(subtitle));
+                const nextChoice = subtitleOptions[(i + 1) % subtitleOptions.length];
+                if (nextChoice !== undefined) chooseSubtitle(nextChoice);
+              }}
+            >
+              💬 {subtitleLabel(subtitle)}
+            </button>
+            <button
+              type="button"
+              className="button"
+              data-nav
+              title="Charger un fichier de sous-titres (SRT, WebVTT) depuis cet appareil"
+              onClick={() => fileInput.current?.click()}
+            >
+              📄 Fichier…
+            </button>
+            <input
+              ref={fileInput}
+              type="file"
+              accept=".srt,.vtt,text/vtt,application/x-subrip"
+              hidden
+              data-testid="subtitle-file"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = '';
+                if (file !== undefined) void loadSubtitleFile(file);
+              }}
+            />
+            {subtitle.kind !== 'off' && (
+              <>
+                <button
+                  type="button"
+                  className="button"
+                  data-nav
+                  aria-label="Sous-titres plus tôt"
+                  onClick={() => {
+                    setSubtitleDelayS((d) => d - SUBTITLE_DELAY_STEP_S);
+                  }}
+                >
+                  −{SUBTITLE_DELAY_STEP_S.toLocaleString('fr-FR')} s
+                </button>
+                <span className="vod-clock" data-testid="subtitle-delay">
+                  Décalage {subtitleDelayS > 0 ? '+' : ''}
+                  {subtitleDelayS.toLocaleString('fr-FR')} s
+                </span>
+                <button
+                  type="button"
+                  className="button"
+                  data-nav
+                  aria-label="Sous-titres plus tard"
+                  onClick={() => {
+                    setSubtitleDelayS((d) => d + SUBTITLE_DELAY_STEP_S);
+                  }}
+                >
+                  +{SUBTITLE_DELAY_STEP_S.toLocaleString('fr-FR')} s
+                </button>
+              </>
             )}
             <span className="spacer" />
             <span className="vod-clock" data-testid="vod-clock">

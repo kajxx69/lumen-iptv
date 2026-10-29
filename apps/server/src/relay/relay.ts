@@ -75,6 +75,11 @@ const STALL_CHECK_INTERVAL_MS = 250;
 const FREEZE_BYTES_RECENT_MS = 1000;
 /** Lissage du débit attendu (moyenne mobile exponentielle sur les segments publiés). */
 const BITRATE_SMOOTHING = 0.2;
+/**
+ * Segments plus courts exclus du débit attendu : ceux du démarrage rapide (≈ 0,5 s) tiennent
+ * surtout dans leur image clé, et le gonfleraient au point de faire juger lente une source saine.
+ */
+const MIN_BITRATE_SAMPLE_S = 1;
 /** Part d'un segment noire ou muette pour le compter comme « mort ». */
 const DEAD_SEGMENT_RATIO = 0.9;
 
@@ -351,6 +356,7 @@ export class Relay {
     const advancesAtStart = this.output.segmenter.stats.timestampAdvances;
     let advances = advancesAtStart;
     let advancedAt = openedAt;
+    let firstByteAt: number | null = null;
     const detection = this.options.detection;
     const watchdog = setInterval(() => {
       const now = Date.now();
@@ -374,7 +380,7 @@ export class Relay {
         controller.abort();
         return;
       }
-      if (this.isTooSlow(now, openedAt)) {
+      if (firstByteAt !== null && this.isTooSlow(now, firstByteAt)) {
         this.log.warn({ source: source.id }, 'source trop lente pour tenir le direct');
         this.connectionEnd ??= 'slow';
         controller.abort();
@@ -405,6 +411,7 @@ export class Relay {
               const now = Date.now();
               if (firstByte) {
                 firstByte = false;
+                firstByteAt = now;
                 this.emit(source, { kind: 'firstByte', at: now, ms: now - fetchStart });
               }
               this.lastBytesAt = now;
@@ -449,12 +456,13 @@ export class Relay {
   /**
    * Source trop lente : sur la dernière fenêtre, elle livre bien moins d'octets que le flux
    * n'en consomme. Seulement s'il existe une autre source (sinon, mieux vaut un flux lent
-   * que pas de flux) et une fois le débit du flux connu.
+   * que pas de flux), une fois le débit du flux connu, et sur une fenêtre entièrement
+   * postérieure au premier octet : l'attente du lien et de la réponse n'est pas de la lenteur.
    */
-  private isTooSlow(now: number, openedAt: number): boolean {
+  private isTooSlow(now: number, firstByteAt: number): boolean {
     const d = this.options.detection;
     const expected = this.expectedBytesPerS;
-    if (expected === null || this.sources.length < 2 || now - openedAt < d.slowWindowMs) return false;
+    if (expected === null || this.sources.length < 2 || now - firstByteAt < d.slowWindowMs) return false;
     const since = now - d.slowWindowMs;
     this.arrivals = this.arrivals.filter((a) => a.at >= since);
     const received = this.arrivals.reduce((n, a) => n + a.bytes, 0);
@@ -495,10 +503,11 @@ export class Relay {
     this.published++;
     if (draft.durationS > 0) {
       const bytesPerS = draft.data.length / draft.durationS;
-      this.expectedBytesPerS =
-        this.expectedBytesPerS === null
-          ? bytesPerS
-          : this.expectedBytesPerS + BITRATE_SMOOTHING * (bytesPerS - this.expectedBytesPerS);
+      if (draft.durationS >= MIN_BITRATE_SAMPLE_S)
+        this.expectedBytesPerS =
+          this.expectedBytesPerS === null
+            ? bytesPerS
+            : this.expectedBytesPerS + BITRATE_SMOOTHING * (bytesPerS - this.expectedBytesPerS);
       this.emit(this.current, {
         kind: 'segment',
         at: now,

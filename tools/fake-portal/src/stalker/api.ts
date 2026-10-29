@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ChaosController } from '../chaos/controller.js';
 import { type Clock, sleep } from '../clock.js';
 import type { FakePortalConfig } from '../config.js';
-import { archiveStreamId } from '../media/stream-routes.js';
+import { archiveStreamId, isMultilingualMovie } from '../media/stream-routes.js';
 import type { Catalog, Channel, Genre, Programme } from './catalog.js';
 import type { PlayKind, Session, SessionStore } from './sessions.js';
 
@@ -116,7 +116,9 @@ export function registerStalkerApi(app: FastifyInstance, deps: ApiDeps): void {
   }
 
   function programmeJson(p: Programme, c: Channel, now: number): Json {
-    const archivable = c.archiveDays > 0 && p.endMs <= now && p.startMs >= now - c.archiveDays * 86_400_000;
+    // Programme commencé (en cours compris, comme les portails qui offrent le différé du direct)
+    // et dans la fenêtre d'archive de la chaîne.
+    const archivable = c.archiveDays > 0 && p.startMs <= now && p.startMs >= now - c.archiveDays * 86_400_000;
     return {
       id: p.id,
       ch_id: n(c.id),
@@ -338,7 +340,8 @@ export function registerStalkerApi(app: FastifyInstance, deps: ApiDeps): void {
         const m = /\/media\/(\d+)\.mpg/.exec(ctx.q['cmd'] ?? '');
         const movie = m?.[1] === undefined ? undefined : catalog.movieById.get(Number(m[1]));
         if (movie === undefined) return nothingToPlay();
-        const url = playUrl(ctx, 'vod', String(movie.id), '/play/movie.php', '&extension=ts');
+        const extension = isMultilingualMovie(config, String(movie.id)) ? 'mkv' : 'ts';
+        const url = playUrl(ctx, 'vod', String(movie.id), '/play/movie.php', `&extension=${extension}`);
         return ok({ id: n(movie.id), cmd: `ffmpeg ${url}`, load: n(0), error: '' });
       },
     },

@@ -44,6 +44,12 @@ export class VodSegments {
     private readonly options: VodSegmentsOptions,
     /** Horodatage du début du fichier (90 kHz) : position 0 du film. */
     private readonly originTicks: number,
+    /**
+     * Position demandée (s). Un flux qui ne sait pas sauter (archive en flux continu, serveur
+     * sans Range) est lu depuis son début : tout segment fini avant cette position est écarté.
+     * Un fichier qui sait sauter commence déjà à l'image clé qui la précède : rien n'est écarté.
+     */
+    private readonly fromS = 0,
   ) {}
 
   get count(): number {
@@ -54,12 +60,15 @@ export class VodSegments {
     return this.ended;
   }
 
-  add(draft: SegmentDraft): VodSegment {
+  /** Segment du découpeur ; null s'il finit avant la position demandée (écarté). */
+  add(draft: SegmentDraft): VodSegment | null {
+    // Les images B d'avant le début donnent un léger négatif : la position commence à 0.
+    const mediaStartS = Math.max(0, timestampDelta(this.originTicks, draft.startTs) / MPEG_CLOCK_HZ);
+    if (mediaStartS + draft.durationS <= this.fromS) return null;
     const segment: VodSegment = {
       seq: this.list.length,
       durationS: draft.durationS,
-      // Les images B d'avant le début donnent un léger négatif : la position commence à 0.
-      mediaStartS: Math.max(0, timestampDelta(this.originTicks, draft.startTs) / MPEG_CLOCK_HZ),
+      mediaStartS,
       data: draft.data,
       discontinuity: draft.discontinuity && this.list.length > 0,
     };

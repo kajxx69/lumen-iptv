@@ -79,3 +79,45 @@ export function formatClock(totalS: number): string {
 /** Repère d'un épisode : « S2 · É5 — Titre ». */
 export const episodeLabel = (season: number, episode: number, name: string): string =>
   `S${season} · É${episode}${name.trim() === '' ? '' : ` — ${name}`}`;
+
+// --- Rattrapage et différé (archive du portail) ---
+
+/**
+ * Fin d'une émission archivée encore à l'antenne : à moins de ce retard sur le direct, on
+ * rejoint le direct ; au-delà, l'archive (qui s'arrête au présent) est relancée au même point.
+ */
+export const JOIN_LIVE_WITHIN_S = 60;
+/** Le guide et l'archive d'un portail ne s'accordent pas toujours à la seconde près. */
+const PROGRAMME_MATCH_TOLERANCE_MS = 60_000;
+const MS_PER_S = 1000;
+
+export interface ArchiveProgramme {
+  start: number;
+  end: number;
+  catchup: boolean;
+}
+
+/** Retard sur le direct (s) à cette position d'une émission archivée commencée à `startMs`. */
+export const behindLiveS = (startMs: number, positionS: number, now: number): number =>
+  (now - startMs) / MS_PER_S - positionS;
+
+export type AfterArchive = { kind: 'live' } | { kind: 'archive'; start: number; end: number; startS: number };
+
+/** Que lire quand l'archive d'une émission s'arrête : la suite de l'émission, la suivante, ou le direct. */
+export function afterArchive(
+  programmes: readonly ArchiveProgramme[],
+  current: { start: number; end: number },
+  positionS: number,
+  now: number,
+): AfterArchive {
+  if (current.end > now) {
+    return behindLiveS(current.start, positionS, now) <= JOIN_LIVE_WITHIN_S
+      ? { kind: 'live' }
+      : { kind: 'archive', start: current.start, end: current.end, startS: positionS };
+  }
+  const next = programmes
+    .filter((p) => Math.abs(p.start - current.end) <= PROGRAMME_MATCH_TOLERANCE_MS && p.start > current.start)
+    .sort((a, b) => a.start - b.start)[0];
+  if (next === undefined || next.start >= now) return { kind: 'live' };
+  return { kind: 'archive', start: next.start, end: next.end, startS: 0 };
+}

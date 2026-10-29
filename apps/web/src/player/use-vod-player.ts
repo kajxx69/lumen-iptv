@@ -2,6 +2,7 @@ import {
   type QualityProfile,
   VOD_TIMELINE_EPOCH_MS,
   type VodAudioTrackDto,
+  type VodSubtitleTrackDto,
   type VodItemRef,
   VodPlaybackDto,
 } from '@lumen/protocol';
@@ -54,6 +55,13 @@ export interface VodPlayerState {
   audioTrack: number;
   transcode: { video: boolean; audio: boolean } | null;
   quality: QualityProfile | null;
+  /** Lecture en cours (relève des sous-titres) ; null avant le démarrage. */
+  sessionId: string | null;
+  subtitleTracks: VodSubtitleTrackDto[];
+  /** Sous-titres en images incrustés ; null : aucun. */
+  burnedSubtitle: number | null;
+  /** Message du serveur pour le spectateur (incrustation refusée…). */
+  notice: string | null;
 }
 
 const INITIAL: VodPlayerState = {
@@ -70,6 +78,10 @@ const INITIAL: VodPlayerState = {
   audioTrack: 0,
   transcode: null,
   quality: null,
+  sessionId: null,
+  subtitleTracks: [],
+  burnedSubtitle: null,
+  notice: null,
 };
 
 export interface VodPlayer {
@@ -79,6 +91,10 @@ export interface VodPlayer {
   seekBy: (deltaS: number) => void;
   setAudioTrack: (index: number) => void;
   retry: () => void;
+  /** Incruste ces sous-titres en images (null : plus aucun) ; la lecture repart au même endroit. */
+  setBurnSubtitle: (index: number | null) => void;
+  /** Position dans le titre à cet instant, lue sur la vidéo (pour l'affichage des répliques). */
+  position: () => number;
 }
 
 function messageFor(err: unknown): string {
@@ -115,6 +131,7 @@ export function useVodPlayer(
   item: VodItemRef,
   initialStartS: number,
   quality: QualityProfile,
+  options: { resumeEarlyEnd: boolean } = { resumeEarlyEnd: true },
 ): VodPlayer {
   const [state, setState] = useState<VodPlayerState>(INITIAL);
   const caps = useMemo(() => detectCapabilities(Hls.isSupported()), []);
@@ -124,10 +141,13 @@ export function useVodPlayer(
   const offsetRef = useRef(initialStartS);
   const playlistRef = useRef<PlaylistRange | null>(null);
   const audioRef = useRef<number | undefined>(undefined);
+  const burnRef = useRef<number | null>(null);
   const disposed = useRef(false);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   /** Toujours la version courante de `reopen` : hls.js et les écouteurs vidéo la rappellent plus tard. */
   const reopenRef = useRef<(startS: number) => Promise<void>>(() => Promise.resolve());
+  const resumeEarlyEnd = useRef(options.resumeEarlyEnd);
+  resumeEarlyEnd.current = options.resumeEarlyEnd;
   const qualityRef = useRef(quality);
   qualityRef.current = quality;
   const itemKey = JSON.stringify(item);
@@ -225,6 +245,7 @@ export function useVodPlayer(
             caps,
             quality: qualityRef.current,
             ...(audioRef.current === undefined ? {} : { audioTrack: audioRef.current }),
+            ...(burnRef.current === null ? {} : { burnSubtitle: burnRef.current }),
             ...(previous === null ? {} : { replaces: previous.sessionId }),
           },
         });
@@ -244,6 +265,10 @@ export function useVodPlayer(
           audioTrack: dto.audioTrack,
           transcode: dto.transcode,
           quality: dto.quality,
+          sessionId: dto.sessionId,
+          subtitleTracks: dto.subtitleTracks,
+          burnedSubtitle: dto.burnedSubtitle,
+          notice: dto.notice,
         }));
         attach(dto);
       } catch (err) {
@@ -266,6 +291,7 @@ export function useVodPlayer(
     disposed.current = false;
     sessionRef.current = null;
     audioRef.current = undefined;
+    burnRef.current = null;
     setState(INITIAL);
     void reopen(initialStartS);
     return () => {
@@ -315,7 +341,7 @@ export function useVodPlayer(
     };
     const ended = (): void => {
       const pos = position();
-      if (endedEarly(pos, sessionRef.current?.durationS ?? null)) {
+      if (resumeEarlyEnd.current && endedEarly(pos, sessionRef.current?.durationS ?? null)) {
         void reopenRef.current(pos);
         return;
       }
@@ -378,6 +404,12 @@ export function useVodPlayer(
       // Autre piste : le serveur relit le fichier avec elle, à la position en cours.
       void reopen(position());
     },
+    setBurnSubtitle: (index: number | null) => {
+      if (index === burnRef.current) return;
+      burnRef.current = index;
+      void reopen(position());
+    },
+    position,
     retry: () => {
       void reopen(position());
     },

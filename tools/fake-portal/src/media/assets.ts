@@ -139,7 +139,7 @@ function assetDirName(kind: AssetKind, media: MediaConfig): string {
   return `${kind}-${hash}`;
 }
 
-function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
+export function runFfmpeg(ffmpegPath: string, args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';

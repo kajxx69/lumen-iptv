@@ -6,6 +6,7 @@ import type { FakePortalConfig } from '../config.js';
 import type { PlayKind, SessionStore } from '../stalker/sessions.js';
 import { type StreamConnections, writeOut } from './connections.js';
 import { ContinuityRewriter } from './mpegts.js';
+import { buildMultilingualMovie } from './multilingual.js';
 import type { SegmentRenderer } from './renderer.js';
 
 export interface StreamDeps {
@@ -37,6 +38,16 @@ const SegmentQuery = z.object({ play_token: z.string().min(1) });
 
 export const archiveStreamId = (channelId: string, startSec: number, durationMin: number): string =>
   `${channelId}_${startSec}_${durationMin}`;
+
+const MKV_CONTENT_TYPE = 'video/x-matroska';
+
+/** Un film sur `multilingualMovieEvery` est un MKV à deux pistes audio et deux sous-titres. */
+export const isMultilingualMovie = (config: FakePortalConfig, streamId: string): boolean => {
+  const id = Number(streamId);
+  return (
+    config.multilingualMovieEvery > 0 && Number.isInteger(id) && id % config.multilingualMovieEvery === 0
+  );
+};
 
 export function registerStreamRoutes(app: FastifyInstance, deps: StreamDeps): void {
   const { config, clock, chaos, sessions, renderer, connections } = deps;
@@ -187,7 +198,7 @@ export function registerStreamRoutes(app: FastifyInstance, deps: StreamDeps): vo
     if (!(await gate(req, reply, stream))) return reply;
     // Un lecteur VOD rouvre le fichier à chaque saut (requêtes Range) : lien réutilisable.
     if (!(await authorize(reply, token, 'vod', stream, true))) return reply;
-    const body = renderMovie(stream);
+    const { body, type } = await renderMovie(stream);
     const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '');
     let start = 0;
     let end = body.length - 1;
@@ -200,6 +211,7 @@ export function registerStreamRoutes(app: FastifyInstance, deps: StreamDeps): vo
     }
     const slice = body.subarray(start, end + 1);
     const headers: Record<string, string | number> = {
+      'Content-Type': type,
       'Content-Length': slice.length,
       'Accept-Ranges': 'bytes',
     };
@@ -217,13 +229,20 @@ export function registerStreamRoutes(app: FastifyInstance, deps: StreamDeps): vo
    * le rendu complet coûte plusieurs secondes de processeur. Les pannes de contenu (écran
    * noir, gel) visent les chaînes en direct ; un film ne dépend que de son identifiant.
    */
-  const movies = new Map<string, Buffer>();
+  const movies = new Map<string, Promise<{ body: Buffer; type: string }>>();
   const MOVIES_KEPT = 4;
 
-  function renderMovie(streamId: string): Buffer {
+  function renderMovie(streamId: string): Promise<{ body: Buffer; type: string }> {
     const hit = movies.get(streamId);
     if (hit !== undefined) return hit;
-    const body = renderMovieOnce(streamId);
+    const ts = renderMovieOnce(streamId);
+    const body = isMultilingualMovie(config, streamId)
+      ? buildMultilingualMovie(config.ffmpegPath, ts, config.media.loopDurationS).then((mkv) => ({
+          body: mkv,
+          type: MKV_CONTENT_TYPE,
+        }))
+      : Promise.resolve({ body: ts, type: TS_CONTENT_TYPE });
+    body.catch(() => movies.delete(streamId));
     movies.set(streamId, body);
     for (const old of movies.keys()) {
       if (movies.size <= MOVIES_KEPT) break;
@@ -255,10 +274,13 @@ export function registerStreamRoutes(app: FastifyInstance, deps: StreamDeps): vo
     const minutes = Math.min(duration, config.archiveMaxDurationMin);
     const first = timeline.segmentAt(start * 1000);
     const count = Math.ceil((minutes * 60) / config.media.segmentDurationS);
+    // Programme encore en cours : l'archive s'arrête au présent, on ne lit pas l'avenir.
+    const available = Math.floor((clock.now() - start * 1000) / (config.media.segmentDurationS * 1000));
+    const served = Math.max(1, Math.min(count, available));
     const res = openStream(reply, stream, { Connection: 'close' });
     const continuity = new ContinuityRewriter();
     await pump(req.log, res, async () => {
-      for (let k = first; k < first + count && !res.destroyed; k++) {
+      for (let k = first; k < first + served && !res.destroyed; k++) {
         const buf = renderer.render(stream, k);
         continuity.rewrite(buf);
         await writeOut(res, buf, chaos);

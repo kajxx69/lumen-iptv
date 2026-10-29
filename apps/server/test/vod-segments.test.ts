@@ -2,6 +2,9 @@ import { VOD_TIMELINE_EPOCH_MS } from '@lumen/protocol';
 import { describe, expect, it } from 'vitest';
 import { MPEG_CLOCK_HZ } from '../src/relay/mpegts.js';
 import type { SegmentDraft } from '../src/relay/segmenter.js';
+import { SOFTWARE_ENCODER } from '../src/transcode/encoders.js';
+import { vodArgs } from '../src/transcode/ffmpeg-args.js';
+import { PASSTHROUGH } from '../src/transcode/plan.js';
 import { defaultAudioTrack, parseProbe } from '../src/vod/probe.js';
 import { VodSegments } from '../src/vod/vod-segments.js';
 
@@ -43,9 +46,20 @@ describe('propriétés d un fichier de film (FFprobe)', () => {
         },
         { codec_type: 'audio', codec_name: 'dts', channels: 2, tags: { title: 'Commentaires' } },
         { codec_type: 'audio', codec_name: 'mp3', tags: { language: 'und' } },
-        { codec_type: 'subtitle', codec_name: 'subrip' },
+        { codec_type: 'subtitle', codec_name: 'subrip', tags: { language: 'fre' } },
+        {
+          codec_type: 'subtitle',
+          codec_name: 'hdmv_pgs_subtitle',
+          tags: { language: 'eng' },
+          disposition: { forced: 1 },
+        },
+        { codec_type: 'subtitle', codec_name: 'dvb_teletext' },
       ],
     });
+    expect(info.subtitles).toEqual([
+      { index: 0, kind: 'text', language: 'fre', label: 'Français', isDefault: false },
+      { index: 1, kind: 'image', language: 'eng', label: 'Anglais (forcés)', isDefault: false },
+    ]);
     expect(info.durationS).toBeCloseTo(5423.12, 2);
     expect(info.startTimeS).toBeCloseTo(0.042, 3);
     // La pochette intégrée n'est pas la vidéo du film.
@@ -83,6 +97,15 @@ describe('segments d une lecture de film', () => {
     expect(playlist).toContain('#EXT-X-PLAYLIST-TYPE:EVENT');
     expect(playlist).toContain('#EXT-X-MEDIA-SEQUENCE:0');
     expect(playlist).not.toContain('#EXT-X-ENDLIST');
+  });
+
+  it('flux lu depuis son début malgré une position demandée : segments d avant écartés', () => {
+    const segs = new VodSegments(options, origin, 60);
+    expect(segs.add(draft(ORIGIN_S + 52, 4))).toBeNull();
+    expect(segs.add(draft(ORIGIN_S + 56, 4))).toBeNull();
+    // Celui qui contient la position est gardé, et numéroté le premier.
+    expect(segs.add(draft(ORIGIN_S + 58, 4))?.seq).toBe(0);
+    expect(pdt(segs.playlist((seq) => `${seq}.ts`))).toEqual([58]);
   });
 
   it('fin du fichier : playlist close', () => {
@@ -127,5 +150,43 @@ describe('segments d une lecture de film', () => {
     const segs = new VodSegments(options, origin);
     segs.add(draft(ORIGIN_S, 6.6));
     expect(segs.playlist((seq) => `${seq}.ts`)).toContain('#EXT-X-TARGETDURATION:7');
+  });
+});
+
+describe('commande FFmpeg d une lecture de film', () => {
+  const base = {
+    url: 'http://127.0.0.1:1/abc',
+    startS: 30,
+    audioIndex: 1,
+    analysisArgs: [],
+    textSubtitles: [0, 2],
+    burnSubtitle: null,
+  };
+  const options = { maxHeight: 720, audioBitrateKbps: 128 };
+
+  it('sous-titres texte : une sortie WebVTT par piste, après le flux vidéo', () => {
+    const args = vodArgs(base, PASSTHROUGH, SOFTWARE_ENCODER, options);
+    const joined = args.join(' ');
+    expect(joined).toContain('-ss 30.000');
+    expect(joined).toContain('-map 0:a:1?');
+    expect(joined).toContain('-map 0:s:0 -c:s webvtt -f webvtt -flush_packets 1 pipe:3');
+    expect(joined).toContain('-map 0:s:2 -c:s webvtt -f webvtt -flush_packets 1 pipe:4');
+    expect(args.indexOf('pipe:1')).toBeLessThan(args.indexOf('pipe:3'));
+  });
+
+  it('sous-titres en images : posés sur l image avant la mise à l échelle, image convertie', () => {
+    const plan = { video: 'h264' as const, audio: 'copy' as const, key: 'h264+copy' };
+    const args = vodArgs({ ...base, burnSubtitle: 1 }, plan, SOFTWARE_ENCODER, options);
+    const graph = args[args.indexOf('-filter_complex') + 1];
+    expect(graph).toBe("[0:V:0][0:s:1]overlay,scale=-2:'min(720,ih)'[v]");
+    expect(args.join(' ')).toContain('-map [v]');
+    expect(args).not.toContain('-vf');
+    expect(args).toContain('libx264');
+  });
+
+  it('sans conversion de l image, aucune incrustation possible : la vidéo est copiée', () => {
+    const args = vodArgs({ ...base, burnSubtitle: 1 }, PASSTHROUGH, SOFTWARE_ENCODER, options);
+    expect(args).not.toContain('-filter_complex');
+    expect(args.join(' ')).toContain('-c:v copy');
   });
 });

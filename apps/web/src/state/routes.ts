@@ -75,6 +75,17 @@ export function parseRoute(path: string, search = ''): Route {
           startS: positionParam(params.get('t')),
         };
       }
+      if (parts[1] === 'archive' && parts[2] !== undefined && parts[3] !== undefined) {
+        const start = Number(parts[4]);
+        const end = Number(parts[5]);
+        if (Number.isInteger(start) && Number.isInteger(end) && end > start && start >= 0) {
+          return {
+            name: 'play',
+            item: { kind: 'archive', portalId: parts[2], channelId: parts[3], start, end },
+            startS: positionParam(params.get('t')),
+          };
+        }
+      }
       return { name: 'home' };
     case 'recherche':
       return { name: 'search', query: params.get('q') ?? '' };
@@ -85,6 +96,19 @@ export function parseRoute(path: string, search = ''): Route {
       return { name: 'home' };
     default:
       return { name: 'home' };
+  }
+}
+
+/** Adresse d'une lecture de film, d'épisode ou d'émission archivée ; `t` : position demandée. */
+function playPath(i: VodItemRef, t: string): string {
+  const e = encodeURIComponent;
+  switch (i.kind) {
+    case 'movie':
+      return `/lire/film/${e(i.portalId)}/${e(i.movieId)}${t}`;
+    case 'episode':
+      return `/lire/episode/${e(i.portalId)}/${e(i.seriesId)}/${e(i.seasonId)}/${e(i.episodeId)}${t}`;
+    case 'archive':
+      return `/lire/archive/${e(i.portalId)}/${e(i.channelId)}/${i.start}/${i.end}${t}`;
   }
 }
 
@@ -113,13 +137,8 @@ export function routePath(route: Route): string {
       return `/films/${e(route.portalId)}/${e(route.movieId)}`;
     case 'show':
       return `/series/${e(route.portalId)}/${e(route.seriesId)}${route.seasonId === null ? '' : `?saison=${e(route.seasonId)}`}`;
-    case 'play': {
-      const t = route.startS === null ? '' : `?t=${Math.floor(route.startS)}`;
-      const i = route.item;
-      return i.kind === 'movie'
-        ? `/lire/film/${e(i.portalId)}/${e(i.movieId)}${t}`
-        : `/lire/episode/${e(i.portalId)}/${e(i.seriesId)}/${e(i.seasonId)}/${e(i.episodeId)}${t}`;
-    }
+    case 'play':
+      return playPath(route.item, route.startS === null ? '' : `?t=${Math.floor(route.startS)}`);
     case 'search':
       return route.query === '' ? '/recherche' : `/recherche?q=${e(route.query)}`;
   }

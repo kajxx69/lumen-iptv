@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { parseRoute, routePath } from '../src/state/routes.js';
 import {
   SERVER_BEHIND_SAFE_S,
+  afterArchive,
+  behindLiveS,
   endedEarly,
   episodeLabel,
   formatClock,
@@ -89,6 +91,17 @@ describe('adresses des écrans de films et séries', () => {
         item: { kind: 'episode', portalId: 'p1', seriesId: '7', seasonId: '7:2', episodeId: '7:2:3' },
         startS: null,
       },
+      {
+        name: 'play',
+        item: {
+          kind: 'archive',
+          portalId: 'p1',
+          channelId: '12',
+          start: 1_700_000_000_000,
+          end: 1_700_003_600_000,
+        },
+        startS: 600,
+      },
       { name: 'search', query: '' },
       { name: 'search', query: 'matrix 1999' },
     ] as const;
@@ -97,5 +110,42 @@ describe('adresses des écrans de films et séries', () => {
       const [pathname = '', search = ''] = path.split('?');
       expect(parseRoute(pathname, search === '' ? '' : `?${search}`)).toEqual(route);
     }
+  });
+});
+
+describe('fin d une émission archivée', () => {
+  const H = 3_600_000;
+  const now = 10 * H;
+  const programmes = [
+    { start: 7 * H, end: 8 * H, catchup: true },
+    { start: 8 * H, end: 9 * H, catchup: true },
+    { start: 9 * H, end: 11 * H, catchup: true },
+  ];
+
+  it('émission terminée : la suivante, depuis son début', () => {
+    expect(afterArchive(programmes, { start: 7 * H, end: 8 * H }, 3600, now)).toEqual({
+      kind: 'archive',
+      start: 8 * H,
+      end: 9 * H,
+      startS: 0,
+    });
+  });
+
+  it('émission encore à l antenne, loin du direct : l archive reprend au même point', () => {
+    const current = { start: 9 * H, end: 11 * H };
+    expect(afterArchive(programmes, current, 1200, now)).toEqual({
+      ...current,
+      kind: 'archive',
+      startS: 1200,
+    });
+    expect(behindLiveS(current.start, 1200, now)).toBe(2400);
+  });
+
+  it('presque rattrapé : retour au direct', () => {
+    expect(afterArchive(programmes, { start: 9 * H, end: 11 * H }, 3600 - 30, now)).toEqual({ kind: 'live' });
+  });
+
+  it('suivante pas encore commencée ou inconnue : le direct', () => {
+    expect(afterArchive([], { start: 7 * H, end: 8 * H }, 3600, now)).toEqual({ kind: 'live' });
   });
 });

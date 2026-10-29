@@ -281,6 +281,18 @@ export const VodItemRef = z.discriminatedUnion('kind', [
     seasonId: VodId,
     episodeId: VodId,
   }),
+  /**
+   * Émission passée (ou en cours) d'une chaîne, lue dans l'archive du portail : rattrapage
+   * depuis le guide, retour au début du programme, pause prolongée du direct. `start` et
+   * `end` : horaires du programme (ms), tels que le guide les donne.
+   */
+  z.object({
+    kind: z.literal('archive'),
+    portalId: VodId,
+    channelId: VodId,
+    start: z.number().int().nonnegative(),
+    end: z.number().int().positive(),
+  }),
 ]);
 export type VodItemRef = z.infer<typeof VodItemRef>;
 
@@ -325,6 +337,11 @@ export const PlaybackRequest = ChannelRef.extend({
   quality: QualityProfile.default('source'),
 });
 export type PlaybackRequest = z.infer<typeof PlaybackRequest>;
+
+/** Chaînes voisines à préparer (zapping instantané) : la précédente et la suivante, en général. */
+export const PREFETCH_MAX_CHANNELS = 4;
+export const PrefetchRequest = z.object({ channels: z.array(ChannelRef).max(PREFETCH_MAX_CHANNELS) });
+export type PrefetchRequest = z.infer<typeof PrefetchRequest>;
 
 export const StreamFormat = z.enum(['ts', 'hls']);
 
@@ -429,6 +446,11 @@ export const VodPlayRequest = z.object({
   audioTrack: z.number().int().min(0).max(64).optional(),
   /** Lecture remplacée (saut, changement de piste) : fermée d'abord, pour libérer la connexion au portail. */
   replaces: z.string().max(64).optional(),
+  /**
+   * Sous-titres en images à incruster (indice parmi `subtitleTracks`) : l'image est alors
+   * convertie, s'il reste une place de conversion. Les sous-titres texte n'en ont pas besoin.
+   */
+  burnSubtitle: z.number().int().min(0).max(64).optional(),
 });
 export type VodPlayRequest = z.input<typeof VodPlayRequest>;
 /** Requête validée, valeurs par défaut appliquées : ce que reçoit le serveur. */
@@ -441,6 +463,15 @@ export const VodAudioTrackDto = z.object({
 });
 export type VodAudioTrackDto = z.infer<typeof VodAudioTrackDto>;
 
+export const VodSubtitleTrackDto = z.object({
+  index: z.number(),
+  language: z.string().nullable(),
+  label: z.string(),
+  /** « text » : affiché par le lecteur, sans coût ; « image » : incrusté dans l'image (conversion). */
+  kind: z.enum(['text', 'image']),
+});
+export type VodSubtitleTrackDto = z.infer<typeof VodSubtitleTrackDto>;
+
 export const VodPlaybackDto = z.object({
   sessionId: z.string(),
   playlistUrl: z.string(),
@@ -451,8 +482,28 @@ export const VodPlaybackDto = z.object({
   audioTrack: z.number(),
   transcode: z.object({ video: z.boolean(), audio: z.boolean() }),
   quality: QualityProfile,
+  subtitleTracks: z.array(VodSubtitleTrackDto),
+  /** Sous-titres incrustés dans cette lecture ; null : aucun. */
+  burnedSubtitle: z.number().nullable(),
+  /** Message pour le spectateur (incrustation refusée faute de place, par exemple) ; null : rien à dire. */
+  notice: z.string().nullable(),
 });
 export type VodPlaybackDto = z.infer<typeof VodPlaybackDto>;
+
+/** Une réplique, en position dans le titre (s). */
+export const SubtitleCueDto = z.object({ startS: z.number(), endS: z.number(), text: z.string() });
+export type SubtitleCueDto = z.infer<typeof SubtitleCueDto>;
+
+/**
+ * Répliques extraites au fil de la lecture du fichier (elles arrivent avec les segments).
+ * `next` : rang de la prochaine à demander (`?after=`) ; `complete` : fichier lu jusqu'au bout.
+ */
+export const SubtitleCuesDto = z.object({
+  cues: z.array(SubtitleCueDto),
+  next: z.number(),
+  complete: z.boolean(),
+});
+export type SubtitleCuesDto = z.infer<typeof SubtitleCuesDto>;
 
 // --- Reprise de lecture (synchronisée entre appareils) ---
 

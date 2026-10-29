@@ -24,6 +24,7 @@ import type { AuthUser } from '../store/auth-store.js';
 import type { LibraryStore } from '../store/library-store.js';
 import { PASSTHROUGH, planOutput } from '../transcode/plan.js';
 import { type TranscodeService, capabilitiesKey } from '../transcode/transcode-service.js';
+import { LinkPrefetcher } from './link-prefetch.js';
 import { SessionView, type ViewSource } from './session-view.js';
 import type { TranscodedOutput } from '../transcode/transcoded-output.js';
 
@@ -81,6 +82,8 @@ interface ViewerSession {
 export class PlaybackService {
   private readonly sessions = new Map<string, ViewerSession>();
   private readonly sweeper: NodeJS.Timeout;
+  /** Liens des chaînes voisines, demandés à l'avance : le zapping n'attend pas le portail. */
+  private readonly links: LinkPrefetcher;
 
   constructor(
     private readonly registry: PortalRegistry,
@@ -101,6 +104,28 @@ export class PlaybackService {
       Math.max(100, config.playbackIdleTtlMs / 2),
     );
     this.sweeper.unref();
+    this.links = new LinkPrefetcher(config.linkPrefetchTtlMs);
+  }
+
+  /**
+   * Zapping instantané : les liens des chaînes que le spectateur va probablement lancer
+   * (voisines dans sa liste) sont demandés au portail maintenant. Une chaîne déjà relayée
+   * n'en a pas besoin. Sans réponse attendue : rien ne dépend de cette demande.
+   */
+  async prefetch(refs: readonly ChannelRef[]): Promise<void> {
+    await Promise.all(
+      refs.map(async (ref) => {
+        const best = (await this.candidates({ ...ref, fallbacks: [] }, 1).catch(() => []))[0];
+        if (best === undefined || this.relays.has(this.relayKey(ref))) return;
+        const channel = await this.catalog.channel(best.portalId, best.channelId);
+        if (channel === null) return;
+        const portal = this.registry.get(best.portalId);
+        await this.links.prefetch(sourceId(best), async () => {
+          const link = await portal.provider.client.createLink(channel.cmd);
+          return { url: link.url, format: link.format, userAgent: portal.userAgent };
+        });
+      }),
+    );
   }
 
   async start(user: AuthUser, request: PlaybackRequest): Promise<PlaybackDto> {
@@ -406,6 +431,9 @@ export class PlaybackService {
       portalId: ref.portalId,
       channelId: ref.channelId,
       resolve: async () => {
+        // Lien demandé à l'avance (chaîne voisine) : le relais part sans attendre le portail.
+        const prefetched = this.links.take(sourceId(ref));
+        if (prefetched !== null) return prefetched;
         const link = await portal.provider.client.createLink(channel.cmd);
         return { url: link.url, format: link.format, userAgent: portal.userAgent };
       },

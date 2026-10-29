@@ -225,6 +225,12 @@ export const ServerConfigSchema = z.object({
   /** FFprobe (propriétés des films) ; par défaut, à côté de FFmpeg. */
   ffprobePath: z.string().optional(),
 
+  /**
+   * Zapping instantané : un lien de chaîne voisine demandé à l'avance sert pendant ce délai.
+   * Les jetons des portails expirent vite ; 20 s couvrent l'hésitation d'un zappeur.
+   */
+  linkPrefetchTtlMs: z.coerce.number().int().positive().default(20_000),
+
   /** Cache navigateur des logos : ils changent rarement et coûtent des données mobiles. */
   logoCacheMaxAgeS: z.coerce
     .number()
@@ -289,6 +295,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ServerConfig {
     epgCacheTtlMs: 'EPG_CACHE_TTL_MS',
     epgMaxWindowMs: 'EPG_MAX_WINDOW_MS',
     logoCacheMaxAgeS: 'LOGO_CACHE_MAX_AGE_S',
+    linkPrefetchTtlMs: 'LINK_PREFETCH_TTL_MS',
     vodCatalogTtlMs: 'VOD_CATALOG_TTL_MS',
     vodSeriesCacheTtlMs: 'VOD_SERIES_CACHE_TTL_MS',
     vodMaxSessions: 'VOD_MAX_SESSIONS',

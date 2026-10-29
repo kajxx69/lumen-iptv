@@ -1,7 +1,15 @@
 import { randomBytes } from 'node:crypto';
 import { StalkerError } from '@lumen/core/stalker';
-import type { QualityProfile, VodItemRef, VodPlaybackDto, VodPlayRequestParsed } from '@lumen/protocol';
+import {
+  ALL_PORTALS_ID,
+  type QualityProfile,
+  type VodItemRef,
+  type VodPlaybackDto,
+  type VodPlayRequestParsed,
+} from '@lumen/protocol';
 import type { FastifyBaseLogger } from 'fastify';
+import type { CatalogService } from '../catalog/catalog-service.js';
+import type { MergeService } from '../catalog/merge-service.js';
 import type { VodCatalogService } from '../catalog/vod-catalog-service.js';
 import { ApiError, fromStalker, notFound } from '../http/errors.js';
 import type { PortalRegistry } from '../portals/registry.js';
@@ -15,12 +23,19 @@ import type { TranscodeService } from '../transcode/transcode-service.js';
 import { type MediaInfo, defaultAudioTrack, probeMedia } from './probe.js';
 import type { VodSourceProxy } from './source-proxy.js';
 import type { VodSegmentsOptions } from './vod-segments.js';
-import { VodSession } from './vod-session.js';
+import { type CueBatch, VodSession } from './vod-session.js';
 
 const SESSION_ID_BYTES = 16;
+const MS_PER_S = 1000;
 /** Propriétés d'un fichier gardées ce temps : relancer un film (saut, piste) ne le relit pas. */
 const PROBE_CACHE_TTL_MS = 60 * 60_000;
 const PROBE_CACHE_MAX_ENTRIES = 200;
+/**
+ * Pistes de sous-titres texte extraites au plus par lecture : toutes en même temps, pour
+ * changer de langue sans relancer le film. Au-delà (fichiers à vingt langues), les suivantes
+ * ne sont pas proposées ; chacune coûte peu, mais une sortie de FFmpeg de plus.
+ */
+const MAX_TEXT_SUBTITLE_TRACKS = 8;
 /** Lectures abandonnées (onglet fermé sans arrêt) cherchées à ce rythme. */
 const SWEEP_INTERVAL_MS = 10_000;
 
@@ -40,6 +55,9 @@ export interface VodPlaybackOptions {
 
 export interface VodPlaybackDeps {
   vod: VodCatalogService;
+  /** Chaînes (archive disponible ?) et fusion (« Tous les portails ») : pour le rattrapage. */
+  catalog: CatalogService;
+  merge: MergeService;
   registry: PortalRegistry;
   proxy: VodSourceProxy;
   transcodes: TranscodeService | null;
@@ -52,7 +70,15 @@ interface ResolvedItem {
   /** Clé du fichier (propriétés en cache). */
   key: string;
   link: () => Promise<UpstreamLink>;
+  /**
+   * Durée connue d'avance (émission archivée : celle du guide). Un flux d'archive n'a souvent
+   * ni taille ni durée lisibles ; le guide, lui, sait.
+   */
+  durationS?: number;
 }
+
+/** Programme cherché dans le guide autour de son début annoncé (horloges des portails décalées). */
+const ARCHIVE_MATCH_TOLERANCE_MS = 60_000;
 
 const playlistUrl = (sessionId: string): string => `/api/vod/sessions/${sessionId}/playlist.m3u8`;
 export const vodSegmentUri = (seq: number): string => `${seq}.ts`;
@@ -112,15 +138,24 @@ export class VodPlaybackService {
           : defaultAudioTrack(info);
       const choice = this.plan(info, audioIndex, request);
       release = choice.release;
+      const burn = this.burn(info, request.burnSubtitle, choice.plan);
+      if (burn.release !== null) release = burn.release;
+      const plan = burn.plan ?? choice.plan;
+      const textSubtitles = info.subtitles
+        .filter((t) => t.kind === 'text')
+        .slice(0, MAX_TEXT_SUBTITLE_TRACKS)
+        .map((t) => t.index);
       const encoder = (await this.deps.transcodes?.encoderReady()) ?? SOFTWARE_ENCODER;
       const session = new VodSession(
         {
           id: randomBytes(SESSION_ID_BYTES).toString('hex'),
           userId: user.id,
           info,
-          plan: choice.plan,
+          plan,
           startS: request.startS,
           audioIndex,
+          textSubtitles,
+          burnSubtitle: burn.index,
         },
         source,
         {
@@ -154,12 +189,17 @@ export class VodPlaybackService {
       return {
         sessionId: session.id,
         playlistUrl: playlistUrl(session.id),
-        durationS: info.durationS,
+        durationS: item.durationS ?? info.durationS,
         startS: request.startS,
         audioTracks: info.audio.map((t) => ({ index: t.index, language: t.language, label: t.label })),
         audioTrack: audioIndex,
-        transcode: { video: choice.plan.video !== 'copy', audio: choice.plan.audio !== 'copy' },
+        transcode: { video: plan.video !== 'copy', audio: plan.audio !== 'copy' },
         quality: choice.quality,
+        subtitleTracks: info.subtitles
+          .filter((t) => t.kind === 'image' || textSubtitles.includes(t.index))
+          .map((t) => ({ index: t.index, language: t.language, label: t.label, kind: t.kind })),
+        burnedSubtitle: burn.index,
+        notice: burn.notice,
       };
     } catch (err) {
       release?.();
@@ -209,7 +249,53 @@ export class VodPlaybackService {
     }
   }
 
+  /**
+   * Sous-titres en images à incruster : l'image doit être convertie. Déjà convertie, rien ne
+   * change ; sinon il faut une place de conversion. Sans place, le film part quand même,
+   * sans incrustation, avec un message : voir l'image passe avant les sous-titres.
+   */
+  private burn(
+    info: MediaInfo,
+    requested: number | undefined,
+    plan: OutputPlan,
+  ): { index: number | null; plan: OutputPlan | null; release: (() => void) | null; notice: string | null } {
+    const none = { index: null, plan: null, release: null, notice: null };
+    const track = info.subtitles.find((t) => t.index === requested && t.kind === 'image');
+    if (track === undefined || info.video === null) return none;
+    if (plan.video === 'h264') return { ...none, index: track.index };
+    const transcodes = this.deps.transcodes;
+    if (transcodes === null) {
+      return {
+        ...none,
+        notice: 'Sous-titres en images indisponibles : la conversion est désactivée sur ce serveur.',
+      };
+    }
+    try {
+      const release = transcodes.reserveVideo();
+      return {
+        index: track.index,
+        plan: { ...plan, video: 'h264', key: `h264+${plan.audio}` },
+        release,
+        notice: null,
+      };
+    } catch {
+      return {
+        ...none,
+        notice:
+          'Sous-titres en images indisponibles pour l’instant : le serveur convertit déjà le maximum de flux.',
+      };
+    }
+  }
+
+  /** Répliques d'une piste de sous-titres texte de cette lecture. */
+  subtitleCues(user: AuthUser, sessionId: string, index: number, after: number): CueBatch {
+    const batch = this.owned(user, sessionId).subtitleCues(index, after);
+    if (batch === null) throw notFound('sous-titres');
+    return batch;
+  }
+
   private async resolveItem(ref: VodItemRef): Promise<ResolvedItem> {
+    if (ref.kind === 'archive') return this.resolveArchive(ref);
     const portal = this.deps.registry.get(ref.portalId);
     const { client } = portal.provider;
     const asUpstream = async (
@@ -230,6 +316,42 @@ export class VodPlaybackService {
       key: `e:${ref.portalId}:${ref.seriesId}:${ref.seasonId}:${ref.episodeId}`,
       link: () => asUpstream(client.createEpisodeLink(episode.cmd)),
     };
+  }
+
+  /**
+   * Émission archivée : la chaîne (ou, vue « Tous les portails », la première de ses sources
+   * qui garde une archive), puis le programme dans son guide, marqué « archivé » par le portail.
+   */
+  private async resolveArchive(ref: Extract<VodItemRef, { kind: 'archive' }>): Promise<ResolvedItem> {
+    const sources =
+      ref.portalId === ALL_PORTALS_ID
+        ? (this.deps.merge.members(ref.channelId) ?? [])
+        : [{ portalId: ref.portalId, channelId: ref.channelId }];
+    for (const source of sources) {
+      const channel = await this.deps.catalog.channel(source.portalId, source.channelId);
+      if (channel === null || channel.archiveHours <= 0) continue;
+      const portal = this.deps.registry.get(source.portalId);
+      const programmes = await portal.provider
+        .getEpg(source.channelId, {
+          from: ref.start - ARCHIVE_MATCH_TOLERANCE_MS,
+          to: ref.end + ARCHIVE_MATCH_TOLERANCE_MS,
+        })
+        .catch(() => []);
+      const programme = programmes
+        .filter((p) => p.catchup !== null && Math.abs(p.start - ref.start) <= ARCHIVE_MATCH_TOLERANCE_MS)
+        .sort((a, b) => Math.abs(a.start - ref.start) - Math.abs(b.start - ref.start))[0];
+      const catchup = programme?.catchup;
+      if (programme === undefined || catchup == null) continue;
+      return {
+        key: `a:${source.portalId}:${source.channelId}:${programme.start}`,
+        link: async () => {
+          const link = await portal.provider.resolveStream(catchup);
+          return { url: link.url, format: link.format, userAgent: portal.userAgent };
+        },
+        durationS: (programme.end - programme.start) / MS_PER_S,
+      };
+    }
+    throw new ApiError(404, 'not_found', 'cette émission n’est pas (ou plus) dans l’archive du portail');
   }
 
   private probe(key: string, url: string): Promise<MediaInfo> {

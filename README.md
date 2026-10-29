@@ -2,14 +2,15 @@
 
 Lecteur IPTV (Stalker Portal) centré sur la résilience. Voir [PROJECT.md](PROJECT.md) pour la spécification.
 
-**État : phase 9** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
+**État : phase 10** — portail factice et chaos (0), client Stalker (1), backend Fastify : API,
 comptes et chiffrement des portails (2), relais avec tampon glissant et bascule de source (3),
 client web : catalogue virtualisé, lecteur, guide des programmes, favoris (4), moteur de
 résilience : détection de panne à trois niveaux, score de santé, sondes, tampon adaptatif (5),
 agrégation multi-portails et dédoublonnage (6), transcodage adaptatif et LL-HLS (7), adaptation
 au réseau : qualité automatique, économie de données, compteur de consommation (8), films et
 séries : catalogue, fiches, lecture avec reprise synchronisée, épisode suivant, recherche
-globale (9).
+globale (9), lecture avancée : sous-titres, pistes audio, zapping instantané, rattrapage et
+différé du direct (10).
 
 ## Prérequis
 
@@ -382,6 +383,35 @@ avancent de 10 s, OK met en pause.
 
 Mesuré (portail factice, film de 64 s) : lecture prête en moins de 3 s ; coupure de 3 s du
 portail en plein film, aucun trou dans le film.
+
+## Lecture avancée
+
+**Sous-titres des films.** Les pistes texte du fichier (SRT, ASS, WebVTT…) sont extraites par
+le même FFmpeg que l'image, au fil de la lecture (une sortie WebVTT par piste, 8 au plus) :
+changer de langue est instantané, sans relancer le film. Les répliques gardent leur position
+dans le titre, saut compris. Les sous-titres **en images** (PGS des Blu-ray, DVB) sont
+incrustés dans l'image, ce qui demande une conversion : s'il reste une place, le film repart
+avec eux ; sinon il continue sans, avec un message. La langue choisie est retrouvée d'un film à
+l'autre (mémorisée sur l'appareil). Un fichier **SRT ou WebVTT de l'appareil** peut être chargé
+à tout moment ; décalage réglable par demi-seconde.
+
+**Zapping instantané.** Dès qu'une chaîne joue, le serveur demande au portail les liens de la
+précédente et de la suivante (`LUMEN_LINK_PREFETCH_TTL_MS`, 20 s ; un lien ne sert qu'une
+fois). Mesuré avec un portail qui répond en 800 ms : 1 138 ms pour démarrer une chaîne non
+préparée, **114 ms** pour une chaîne préparée.
+
+**Rattrapage et différé** (chaînes dont le portail garde une archive) :
+
+- **« ⏮ Début du programme »** dans le lecteur du direct ; **« ↺ Revoir »** sur les émissions
+  passées du guide (qui montre désormais les deux dernières heures).
+- **Pause prolongée** : au-delà de ce que le serveur garde du direct, la reprise se fait dans
+  l'archive, à l'instant exact de la pause.
+- Une émission archivée se lit comme un film (sauts, coupures, sous-titres de la même manière),
+  avec « 📡 Direct » à tout moment et le retard affiché. À sa fin : l'émission suivante ; si
+  l'émission est encore à l'antenne, son archive est relue plus loin, et à moins d'une minute
+  du direct, le lecteur rejoint le direct.
+- Une archive en flux continu ne sait pas sauter : elle est relue depuis le début de
+  l'émission et les segments d'avant la position sont écartés (rien n'est envoyé au lecteur).
 
 ## Arborescence
 

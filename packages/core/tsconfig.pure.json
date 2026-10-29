@@ -5,5 +5,5 @@
     "types": [],
     "noEmit": true
   },
-  "include": ["stalker", "sources", "catalog", "resilience"]
+  "include": ["stalker", "sources", "catalog", "resilience", "subtitles"]
 }

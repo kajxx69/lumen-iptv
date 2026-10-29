@@ -25,6 +25,8 @@ export const FakePortalConfigSchema = z.object({
   channelCount: z.coerce.number().int().min(1).default(5000),
   vodCount: z.coerce.number().int().min(0).default(1500),
   seriesCount: z.coerce.number().int().min(0).default(300),
+  /** Un film sur N est un MKV multilingue (deux pistes audio, deux sous-titres) ; 0 : aucun. */
+  multilingualMovieEvery: z.coerce.number().int().min(0).default(4),
   radioCount: z.coerce.number().int().min(0).default(200),
   /** Taille de page observée sur la plupart des portails Stalker. */
   pageSize: z.coerce.number().int().min(1).default(14),
@@ -154,6 +156,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): FakePortalConfig {
     ['channelCount', 'CHANNEL_COUNT'],
     ['vodCount', 'VOD_COUNT'],
     ['seriesCount', 'SERIES_COUNT'],
+    ['multilingualMovieEvery', 'MULTILINGUAL_MOVIE_EVERY'],
     ['radioCount', 'RADIO_COUNT'],
     ['pageSize', 'PAGE_SIZE'],
     ['login', 'LOGIN'],

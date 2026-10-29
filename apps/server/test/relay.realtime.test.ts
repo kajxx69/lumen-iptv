@@ -494,6 +494,25 @@ describe('moteur de résilience : sources trouvées seules, gel, écran noir, d�
     expect(ms).toBeLessThan(8000);
   });
 
+  it('premier octet lent à venir (3 s) puis débit normal : pas de fausse lenteur, A gardée', async () => {
+    // Relevé sur un vrai portail : session, create_link et premier octet prennent plusieurs
+    // secondes. Les quitter pour « lenteur » coûte cher (une seule connexion par abonnement).
+    const d = await dual();
+    const { onA } = await paired(d, 5);
+    await sendChaos(d.a.baseUrl, 'latency', { ms: 3000, scope: 'stream' });
+    // Pas de rafale d'ouverture (que le faux portail enverrait d'un bloc) : le flux arrive au
+    // rythme du direct, comme sur ce portail. ≈ 1,25 fois son débit : la source tient le direct.
+    await sendChaos(d.a.baseUrl, 'throttle', { bitrateKbps: 1800 });
+    const pb = await startPlayback(d.srv.admin, { portalId: d.dtoA.id, channelId: onA });
+    const seen = new Set<string | null>();
+    const until = Date.now() + 8000;
+    while (Date.now() < until) {
+      seen.add((await status(d, pb)).activePortalId);
+      await delay(200);
+    }
+    expect([...seen]).toEqual([d.dtoA.id]);
+  });
+
   it('chaîne fusionnée (« Tous les portails ») : lue, et partagée avec la vue du portail', async () => {
     const d = await dual();
     const { onA, onB } = await paired(d, 4);

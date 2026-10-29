@@ -1,5 +1,6 @@
 import {
   type ChannelHealthDto,
+  PrefetchRequest,
   PlaybackQualityRequest,
   PlaybackRequest,
   PlaybackStatsRequest,
@@ -34,6 +35,14 @@ export function registerPlaybackRoutes(app: FastifyInstance, playback: PlaybackS
   app.post('/api/playback', async (req, reply) => {
     const user = requireUser(req);
     return reply.code(201).send(await playback.start(user, parseOr400(PlaybackRequest, req.body)));
+  });
+
+  /** Chaînes voisines de celle regardée : leurs liens sont demandés à l'avance (zapping instantané). */
+  app.post('/api/playback/prefetch', (req, reply) => {
+    requireUser(req);
+    const { channels } = parseOr400(PrefetchRequest, req.body);
+    void playback.prefetch(channels).catch(() => undefined);
+    return reply.code(202).send();
   });
 
   app.get('/api/playback/:sessionId/index.m3u8', async (req, reply) => {

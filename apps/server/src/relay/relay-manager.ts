@@ -43,6 +43,11 @@ export class RelayManager {
     });
   }
 
+  /** Un relais tourne déjà pour cette chaîne (zapping : rien à préparer). */
+  has(key: string): boolean {
+    return this.relays.has(key);
+  }
+
   /** Rattache un spectateur au relais de la chaîne, en l'ouvrant si besoin. */
   acquire(key: string, sources: readonly RelaySource[]): Relay {
     let relay = this.relays.get(key);

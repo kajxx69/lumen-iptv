@@ -173,6 +173,8 @@ export async function createServer(
   await vodProxy.listen();
   const vodPlayback = new VodPlaybackService(vodPlaybackOptions(config), {
     vod,
+    catalog,
+    merge,
     registry,
     proxy: vodProxy,
     transcodes,

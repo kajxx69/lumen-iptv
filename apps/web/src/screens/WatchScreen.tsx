@@ -1,5 +1,5 @@
 import { ALL_PORTALS_ID, type ChannelDto, type PlaybackStatusDto } from '@lumen/protocol';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { favoriteKey, useFavorites, usePortals, useToggleFavorite } from '../api/queries.js';
 import { useCatalog } from '../catalog/use-catalog.js';
 import { ChannelLogo } from '../components/ChannelLogo.js';
@@ -21,6 +21,9 @@ const QUALITY_TICK_MS = 5000;
 
 /** Les commandes s'effacent après ce délai sans action : l'image d'abord. */
 const OVERLAY_HIDE_MS = 4000;
+const MS_PER_S = 1000;
+/** Position à moins de ce délai du début de ce que garde le serveur : déjà perdue, en pratique. */
+const LIVE_WINDOW_MARGIN_S = 1;
 
 /**
  * Indicateur de source et de santé. Quand l'image vient d'un autre portail que celui
@@ -130,9 +133,74 @@ export function WatchScreen({ portalId, channelId }: { portalId: string; channel
   }, [setQuality, telemetry]);
   const epg = useEpg(portalId, [channelId]);
   const programme = nowNext(epg(channelId) ?? [], Date.now());
+  const hasArchive = (channel?.archiveHours ?? 0) > 0;
+  const openArchive = useCallback(
+    (entry: { start: number; end: number }, startS: number) => {
+      navigate({ name: 'play', item: { kind: 'archive', portalId, channelId, ...entry }, startS });
+    },
+    [portalId, channelId],
+  );
+
+  // Pause prolongée : le serveur ne garde que quelques dizaines de secondes du direct. Au-delà,
+  // la reprise se fait dans l'archive du portail, à l'instant exact de la pause.
+  const latencyRef = useRef<number | null>(null);
+  latencyRef.current = player.latencyS;
+  const archiveRef = useRef({
+    hasArchive,
+    entries: epg(channelId) ?? [],
+    openArchive,
+    windowStart: player.liveWindowStart,
+  });
+  archiveRef.current = {
+    hasArchive,
+    entries: epg(channelId) ?? [],
+    openArchive,
+    windowStart: player.liveWindowStart,
+  };
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video === null) return;
+    let pausedAt: number | null = null;
+    const onPause = (): void => {
+      // Instant (horloge murale) de l'image figée : le retard sur le direct est connu.
+      pausedAt = Date.now() - (latencyRef.current ?? 0) * MS_PER_S;
+    };
+    const onPlay = (): void => {
+      const at = pausedAt;
+      pausedAt = null;
+      const a = archiveRef.current;
+      const windowStart = a.windowStart();
+      if (at === null || !a.hasArchive || windowStart === null) return;
+      // Encore dans ce que garde le serveur : hls.js reprend tout seul.
+      if (video.currentTime >= windowStart + LIVE_WINDOW_MARGIN_S) return;
+      const entry = a.entries.find((e) => e.start <= at && at < e.end);
+      if (entry !== undefined) a.openArchive(entry, (at - entry.start) / MS_PER_S);
+    };
+    video.addEventListener('pause', onPause);
+    video.addEventListener('play', onPlay);
+    return () => {
+      video.removeEventListener('pause', onPause);
+      video.removeEventListener('play', onPlay);
+    };
+  }, []);
   const favorites = useFavorites();
   const portals = usePortals();
   const toggle = useToggleFavorite();
+  // Zapping instantané : une fois la chaîne lancée, les liens de ses voisines (chaîne
+  // précédente et suivante) sont demandés au portail à l'avance.
+  const neighbourIds = useMemo(() => {
+    if (catalog === null || channel === undefined) return [];
+    return [neighbour(catalog.channels, channel, -1), neighbour(catalog.channels, channel, 1)]
+      .filter((c): c is ChannelDto => c !== undefined && c.id !== channel.id)
+      .map((c) => c.id);
+  }, [catalog, channel]);
+  useEffect(() => {
+    if (sessionId === null || neighbourIds.length === 0) return;
+    void request('/api/playback/prefetch', {
+      method: 'POST',
+      body: { channels: neighbourIds.map((id) => ({ portalId, channelId: id })) },
+    }).catch(() => undefined);
+  }, [sessionId, neighbourIds, portalId]);
   // Chaîne fusionnée : favorite si l'une de ses sources l'est.
   const favorite = (favorites.data ?? []).some((f) =>
     catalog === null
@@ -279,6 +347,20 @@ export function WatchScreen({ portalId, channelId }: { portalId: string; channel
           </span>
         </div>
         <div className="overlay-bottom">
+          {hasArchive && programme.now !== null && (
+            <button
+              type="button"
+              className="button"
+              data-nav
+              data-testid="restart-programme"
+              title="Revoir l’émission en cours depuis son début (archive du portail)"
+              onClick={() => {
+                if (programme.now !== null) openArchive(programme.now, 0);
+              }}
+            >
+              ⏮ Début du programme
+            </button>
+          )}
           <button
             type="button"
             className="button"

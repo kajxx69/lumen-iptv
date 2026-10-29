@@ -10,7 +10,7 @@ import {
 } from './config.js';
 import { type PortalLocation, locatePortal } from './endpoint.js';
 import { StalkerError, type StalkerErrorKind, asStalkerError } from './errors.js';
-import { detectStreamFormat, redactUrl, stripCmdPrefix } from './links.js';
+import { detectStreamFormat, redactUrl, repairLink, stripCmdPrefix } from './links.js';
 import { collectPages, paginate } from './pagination.js';
 import {
   type Page,
@@ -95,6 +95,8 @@ const MAC_PATTERN = /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/i;
 const DAY_MS = 86_400_000;
 const PROFILE_STATUS_ACTIVE = 0;
 const PROFILE_STATUS_AUTH_REQUIRED = 2;
+/** Relances de get_all_channels : une seule, chaque tentative pouvant durer deux minutes. */
+const BULK_RETRY_ATTEMPTS = 1;
 /** Échecs de get_all_channels qui justifient de passer à la pagination plutôt que d'abandonner. */
 const ALL_CHANNELS_FALLBACK: ReadonlySet<StalkerErrorKind> = new Set(['invalid_response', 'http', 'timeout']);
 
@@ -385,18 +387,25 @@ export class StalkerClient {
   }
 
   /** Appel authentifié avec renouvellement et relances. Renvoie le contenu `js`. */
-  async call(type: string, action: string, params: QueryParams = {}): Promise<unknown> {
+  async call(
+    type: string,
+    action: string,
+    params: QueryParams = {},
+    options: { timeoutMs?: number; retryAttempts?: number } = {},
+  ): Promise<unknown> {
     let session = await this.ensureSession();
+    const retryAttempts = options.retryAttempts ?? this.tuning.retryAttempts;
     for (let attempt = 0; ; attempt++) {
       try {
         return await this.transport.send(
           session.endpoint,
           { type, action, ...params },
           this.headers(session.token),
+          options.timeoutMs ?? this.tuning.requestTimeoutMs,
         );
       } catch (err) {
         const error = asStalkerError(err);
-        if (!error.retryable || attempt >= this.tuning.retryAttempts) {
+        if (!error.retryable || attempt >= retryAttempts) {
           this.log.warn(
             { ...this.logContext, type, action, kind: error.kind, status: error.status },
             'appel en échec',
@@ -438,7 +447,8 @@ export class StalkerClient {
         details: { portalError: error },
       });
     }
-    const url = stripCmdPrefix(raw);
+    // Lien recollé de travers par le portail : la commande du catalogue, déjà complète, est jouée.
+    const url = repairLink(cmd, stripCmdPrefix(raw));
     return { url, format: detectStreamFormat(url), resolvedAt: this.runtime.now() };
   }
 
@@ -463,8 +473,18 @@ export class StalkerClient {
     return parseGenres(await this.call('itv', 'get_genres'));
   }
 
+  /**
+   * Tout le catalogue en une requête : délai long (gros volume), une seule relance. Au-delà,
+   * listChannels passe à la pagination plutôt que d'attendre encore.
+   */
   async getAllChannels(): Promise<StalkerChannel[]> {
-    return parsePage(await this.call('itv', 'get_all_channels'), parseChannel).items;
+    const body = await this.call(
+      'itv',
+      'get_all_channels',
+      {},
+      { timeoutMs: this.tuning.bulkRequestTimeoutMs, retryAttempts: BULK_RETRY_ATTEMPTS },
+    );
+    return parsePage(body, parseChannel).items;
   }
 
   async getOrderedList(

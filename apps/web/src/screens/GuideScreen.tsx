@@ -16,6 +16,12 @@ import { useCurrentPortal } from '../state/use-current-portal.js';
 const PX_PER_MINUTE = 5;
 /** Heures affichées : la soirée en cours d'un coup d'œil. */
 const GUIDE_HOURS = 4;
+/**
+ * Heures passées, à gauche du présent : les émissions à revoir (archive du portail). Le guide
+ * s'ouvre sur le présent ; on y revient en défilant vers la gauche.
+ */
+const GUIDE_PAST_HOURS = 2;
+const MINUTE_MS = 60_000;
 /** Hauteur de la règle des heures (px), identique au CSS. */
 const RULER_HEIGHT_PX = 36;
 /** Largeur de la colonne des chaînes (px), identique à --sidebar-width. */
@@ -29,7 +35,7 @@ interface Selected {
   entry: EpgEntryDto;
 }
 
-/** Guide en grille : chaînes en lignes (virtualisées), programmes sur 4 h, ligne du présent. */
+/** Guide en grille : chaînes en lignes (virtualisées), 2 h passées et 4 h à venir, ligne du présent. */
 export function GuideScreen({ genre }: { genre: string | null }) {
   const { portal, loading: portalsLoading } = useCurrentPortal();
   const portalId = portal?.id ?? null;
@@ -44,8 +50,11 @@ export function GuideScreen({ genre }: { genre: string | null }) {
       clearInterval(timer);
     };
   }, []);
-  const win = useMemo(() => guideWindow(now, GUIDE_HOURS), [now]);
-  const timelineWidth = GUIDE_HOURS * 60 * PX_PER_MINUTE;
+  const win = useMemo(() => {
+    const ahead = guideWindow(now, GUIDE_HOURS);
+    return { start: ahead.start - GUIDE_PAST_HOURS * 60 * MINUTE_MS, end: ahead.end };
+  }, [now]);
+  const timelineWidth = (GUIDE_HOURS + GUIDE_PAST_HOURS) * 60 * PX_PER_MINUTE;
 
   const channels = useMemo(
     () =>
@@ -69,6 +78,14 @@ export function GuideScreen({ genre }: { genre: string | null }) {
     portalId,
     items.map((i) => channels[i.index]?.id ?? '').filter((id) => id !== ''),
   );
+
+  // Ouverture sur le présent : les heures passées attendent à gauche.
+  const hasCatalog = catalog !== null;
+  useEffect(() => {
+    if (hasCatalog && scroller.current !== null) {
+      scroller.current.scrollLeft = GUIDE_PAST_HOURS * 60 * PX_PER_MINUTE;
+    }
+  }, [hasCatalog]);
 
   useEffect(() => {
     if (selected === null) return;
@@ -212,11 +229,36 @@ export function GuideScreen({ genre }: { genre: string | null }) {
                 ▶ Regarder
               </button>
             )}
+            {/* Rattrapage : émission passée (ou commencée) que le portail garde dans son archive. */}
+            {selected.entry.catchup && selected.entry.start <= now && (
+              <button
+                type="button"
+                className={`button${now >= selected.entry.end ? ' primary' : ''}`}
+                data-nav
+                data-testid="catchup"
+                {...(now >= selected.entry.end ? { 'data-nav-default': true } : {})}
+                onClick={() => {
+                  navigate({
+                    name: 'play',
+                    item: {
+                      kind: 'archive',
+                      portalId: portalId ?? '',
+                      channelId: selected.channel.id,
+                      start: selected.entry.start,
+                      end: selected.entry.end,
+                    },
+                    startS: 0,
+                  });
+                }}
+              >
+                {now >= selected.entry.end ? '↺ Revoir' : '⏮ Depuis le début'}
+              </button>
+            )}
             <button
               type="button"
               className="button"
               data-nav
-              {...(selected.entry.start > now || now >= selected.entry.end
+              {...(selected.entry.start > now || (now >= selected.entry.end && !selected.entry.catchup)
                 ? { 'data-nav-default': true }
                 : {})}
               onClick={() => {

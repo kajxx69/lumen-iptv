@@ -15,6 +15,8 @@ const MovieParams = PortalParams.extend({ movieId: Id });
 const SeriesParams = PortalParams.extend({ seriesId: Id });
 const SeasonParams = SeriesParams.extend({ seasonId: Id });
 const SessionParams = z.object({ sessionId: z.string().min(1).max(64) });
+const SubtitleParams = SessionParams.extend({ index: z.coerce.number().int().min(0).max(64) });
+const SubtitleQuery = z.object({ after: z.coerce.number().int().min(0).default(0) });
 const SegmentParams = SessionParams.extend({ file: z.string().regex(/^\d{1,9}\.ts$/) });
 
 const HLS_CONTENT_TYPE = 'application/vnd.apple.mpegurl';
@@ -106,6 +108,16 @@ export function registerVodPlaybackRoutes(app: FastifyInstance, playback: VodPla
       .header('Content-Type', HLS_CONTENT_TYPE)
       .header('Cache-Control', 'no-store')
       .send(playback.playlist(user, sessionId));
+  });
+
+  /** Répliques extraites depuis `after` : le lecteur les relève au fil de la lecture. */
+  app.get('/api/vod/sessions/:sessionId/subtitles/:index', (req, reply) => {
+    const user = requireUser(req);
+    const { sessionId, index } = parseOr400(SubtitleParams, req.params);
+    const { after } = parseOr400(SubtitleQuery, req.query);
+    return reply
+      .header('Cache-Control', 'no-store')
+      .send(playback.subtitleCues(user, sessionId, index, after));
   });
 
   app.get('/api/vod/sessions/:sessionId/:file', (req, reply) => {

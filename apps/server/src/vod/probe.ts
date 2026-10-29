@@ -10,12 +10,26 @@ export interface AudioTrack {
   isDefault: boolean;
 }
 
+/** Sous-titres texte (convertis en WebVTT, affichés par le lecteur) ou en images (incrustés). */
+export type SubtitleKind = 'text' | 'image';
+
+export interface SubtitleTrack {
+  /** Rang parmi les pistes de sous-titres du fichier (FFmpeg : `0:s:<index>`). */
+  index: number;
+  kind: SubtitleKind;
+  language: string | null;
+  label: string;
+  isDefault: boolean;
+}
+
 export interface MediaInfo {
   durationS: number | null;
   /** Horodatage du début du fichier (s) : les positions du film se comptent à partir de lui. */
   startTimeS: number;
   video: { codec: VideoCodec } | null;
   audio: AudioTrack[];
+  /** Pistes de sous-titres affichables ; le télétexte et les formats inconnus sont écartés. */
+  subtitles: SubtitleTrack[];
 }
 
 export class ProbeError extends Error {
@@ -63,6 +77,20 @@ const LANGUAGE_NAMES: Record<string, string> = {
   hau: 'Haoussa',
   sw: 'Swahili',
   swa: 'Swahili',
+};
+
+const TEXT_SUBTITLE_CODECS = new Set(['subrip', 'srt', 'ass', 'ssa', 'mov_text', 'webvtt', 'text']);
+const IMAGE_SUBTITLE_CODECS = new Set(['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvb_subtitle', 'xsub']);
+
+export function subtitleKindOf(name: string): SubtitleKind | null {
+  if (TEXT_SUBTITLE_CODECS.has(name)) return 'text';
+  if (IMAGE_SUBTITLE_CODECS.has(name)) return 'image';
+  return null;
+}
+
+const languageOf = (s: ProbeStream): string | null => {
+  const code = s.tags?.['language']?.toLowerCase();
+  return code === undefined || code === '' || code === 'und' ? null : code;
 };
 
 export function videoCodecOf(name: string): VideoCodec {
@@ -120,8 +148,7 @@ export function parseProbe(output: unknown): MediaInfo {
   const audio = streams
     .filter((s) => s.codec_type === 'audio')
     .map((s, index): AudioTrack => {
-      const code = s.tags?.['language']?.toLowerCase();
-      const language = code === undefined || code === '' || code === 'und' ? null : code;
+      const language = languageOf(s);
       const title = s.tags?.['title']?.trim();
       const surround =
         (s.channels ?? 0) > STEREO_CHANNELS
@@ -141,12 +168,36 @@ export function parseProbe(output: unknown): MediaInfo {
         isDefault: s.disposition?.['default'] === 1,
       };
     });
+  const subtitles = streams
+    .filter((s) => s.codec_type === 'subtitle')
+    .map((s, index): SubtitleTrack | null => {
+      const kind = subtitleKindOf(s.codec_name ?? '');
+      if (kind === null) return null;
+      const language = languageOf(s);
+      const title = s.tags?.['title']?.trim();
+      const name =
+        title !== undefined && title !== ''
+          ? title
+          : language === null
+            ? `Sous-titres ${index + 1}`
+            : (LANGUAGE_NAMES[language] ?? language.toUpperCase());
+      const forced = s.disposition?.['forced'] === 1;
+      return {
+        index,
+        kind,
+        language,
+        label: forced && !name.includes('forcés') ? `${name} (forcés)` : name,
+        isDefault: s.disposition?.['default'] === 1,
+      };
+    })
+    .filter((t): t is SubtitleTrack => t !== null);
   const duration = finite(probe.format?.duration);
   return {
     durationS: duration !== null && duration > 0 ? duration : null,
     startTimeS: finite(probe.format?.start_time) ?? 0,
     video: video === undefined ? null : { codec: videoCodecOf(video.codec_name ?? '') },
     audio,
+    subtitles,
   };
 }
 
