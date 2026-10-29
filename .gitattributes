@@ -1,1 +1,4 @@
 * text=auto eol=lf
+# Fichiers Windows : cmd.exe exige des fins de ligne CRLF ; PowerShell les attend.
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

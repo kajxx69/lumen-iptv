@@ -12,6 +12,23 @@ séries : catalogue, fiches, lecture avec reprise synchronisée, épisode suivan
 globale (9), lecture avancée : sous-titres, pistes audio, zapping instantané, rattrapage et
 différé du direct (10).
 
+## Installation sur un poste Windows
+
+1. Récupérer le projet : `git clone https://github.com/kajxx69/lumen-iptv.git` (Git s'installe
+   avec `winget install --id Git.Git`), ou « Code › Download ZIP » sur GitHub, puis décompresser.
+2. Double-cliquer **`installer.cmd`**. Il installe ce qui manque (Node.js 22, pnpm, FFmpeg, via
+   winget), les dépendances et l'interface web, crée le lanceur `data\lancer-lumen.ps1` avec une
+   clé maître et un mot de passe `admin` neufs (affichés à la fin), et un raccourci « Lumen » sur
+   le Bureau. Relançable sans risque : une clé déjà présente est gardée. `-Dev` ajoute le
+   navigateur des tests de bout en bout.
+3. Lancer avec le raccourci « Lumen » (ou **`Lumen.cmd`**), puis ouvrir http://localhost:8090.
+   Au premier lancement, autoriser Node.js dans le pare-feu (réseaux privés) pour le téléphone et
+   la TV.
+
+Chaque poste a sa propre base : on y ajoute ses portails depuis l'interface. Pour reprendre ceux
+d'un autre poste, copier son `data\lancer-lumen.ps1` (la clé maître) et son `apps\server\data\`
+(la base), Lumen arrêté.
+
 ## Prérequis
 
 | Outil            | Version                                   | Rôle                                         |
